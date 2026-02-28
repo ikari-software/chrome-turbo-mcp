@@ -1,0 +1,25 @@
+{
+  "name": "chrome-turbo-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "chrome-turbo-mcp": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc && cd native && go build -o ../bin/turbo-native .",
+    "build:native": "cd native && go build -o ../bin/turbo-native .",
+    "start": "tsx src/server.ts",
+    "dev": "tsx --watch src/server.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

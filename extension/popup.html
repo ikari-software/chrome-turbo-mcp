@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 340px;
+    min-height: 300px;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    font-size: 11px;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 12px;
+    overflow-x: hidden;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #21262d;
+  }
+  .bolt { font-size: 16px; }
+  .header h1 { font-size: 13px; font-weight: 700; color: #58a6ff; letter-spacing: 0.5px; }
+  .header .ver { font-size: 9px; color: #484f58; margin-left: auto; }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    margin-bottom: 10px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #f85149; flex-shrink: 0; }
+  .dot.on { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
+  .dot.on.pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 4px #3fb95044; } 50% { box-shadow: 0 0 10px #3fb950aa; } }
+  .status-text { flex: 1; }
+  .status-text .label { color: #8b949e; font-size: 10px; }
+  .browsers-list { color: #58a6ff; font-size: 10px; }
+
+  .section { margin-bottom: 10px; }
+  .section-head {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px;
+    color: #484f58; margin-bottom: 4px; padding: 0 2px;
+    display: flex; justify-content: space-between;
+  }
+
+  .log {
+    max-height: 220px;
+    overflow-y: auto;
+    background: #010409;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    padding: 4px 0;
+  }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+
+  .entry {
+    display: flex;
+    align-items: center;
+    padding: 3px 8px;
+    gap: 6px;
+    border-bottom: 1px solid #0d1117;
+    transition: background 0.15s;
+  }
+  .entry:hover { background: #161b22; }
+  .entry.running { background: #161b2288; }
+  .entry .time { color: #484f58; width: 55px; flex-shrink: 0; }
+  .entry .action { color: #58a6ff; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry .action.err { color: #f85149; }
+  .entry .dur { color: #8b949e; text-align: right; width: 50px; flex-shrink: 0; }
+  .entry .dur.fast { color: #3fb950; }
+  .entry .dur.slow { color: #d29922; }
+  .entry .dur.err { color: #f85149; }
+  .entry .spinner {
+    width: 10px; height: 10px; border: 1.5px solid #58a6ff;
+    border-top-color: transparent; border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .stats-row {
+    display: flex;
+    gap: 6px;
+  }
+  .stat {
+    flex: 1;
+    text-align: center;
+    padding: 6px 4px;
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+  }
+  .stat .val { font-size: 15px; font-weight: 700; color: #58a6ff; }
+  .stat .val.warn { color: #f85149; }
+  .stat .lbl { font-size: 8px; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+  .empty { color: #484f58; text-align: center; padding: 20px; font-style: italic; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <span class="bolt">&#x26A1;</span>
+    <h1>CHROME TURBO</h1>
+    <span class="ver">MCP v1.0</span>
+  </div>
+
+  <div class="status-bar">
+    <div class="dot" id="dot"></div>
+    <div class="status-text">
+      <div id="status-label" class="label">Disconnected</div>
+      <div id="browsers" class="browsers-list"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span>Activity</span>
+      <span id="cmd-rate"></span>
+    </div>
+    <div class="log" id="log">
+      <div class="empty" id="empty-msg">Waiting for commands...</div>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat">
+      <div class="val" id="s-cmds">0</div>
+      <div class="lbl">Commands</div>
+    </div>
+    <div class="stat">
+      <div class="val" id="s-errs">0</div>
+      <div class="lbl">Errors</div>
+    </div>
+    <div class="stat">
+      <div class="val" id="s-avg">-</div>
+      <div class="lbl">Avg ms</div>
+    </div>
+    <div class="stat">
+      <div class="val" id="s-up">0s</div>
+      <div class="lbl">Uptime</div>
+    </div>
+  </div>
+
+<script src="popup.js"></script>
+</body>
+</html>
