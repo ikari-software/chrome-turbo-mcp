@@ -4,8 +4,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { WebSocketServer, WebSocket } from 'ws';
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { resolve, dirname, join } from 'path';
+import { homedir, platform } from 'os';
+import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -611,27 +613,102 @@ interface CustomTool {
   description: string;
   code: string;
   params: Array<{ name: string; type: string; description: string; required?: boolean }>;
-  systemPrompt?: string;  // Baked-in context/instructions for Haiku when processing results
+  systemPrompt?: string;
   createdAt: string;
 }
 
-const customToolsPath = resolve(__dirname, '..', 'custom-tools.json');
-const customTools = new Map<string, CustomTool>();
-
-function loadCustomTools() {
-  try {
-    if (existsSync(customToolsPath)) {
-      const data: CustomTool[] = JSON.parse(readFileSync(customToolsPath, 'utf8'));
-      for (const tool of data) customTools.set(tool.name, tool);
-      log(`Loaded ${customTools.size} custom tool(s) from disk`);
-    }
-  } catch (e: any) {
-    log(`Failed to load custom tools: ${e.message}`);
+function getConfigDir(): string {
+  const p = platform();
+  if (p === 'win32') {
+    return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'chrome-turbo-mcp');
   }
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'chrome-turbo-mcp');
 }
 
-function saveCustomTools() {
-  writeFileSync(customToolsPath, JSON.stringify([...customTools.values()], null, 2));
+const configDir = getConfigDir();
+mkdirSync(configDir, { recursive: true });
+
+const db = new Database(join(configDir, 'chrome-turbo.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 3000');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS custom_tools (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    code        TEXT NOT NULL,
+    params      TEXT NOT NULL DEFAULT '[]',
+    system_prompt TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+log(`Database: ${join(configDir, 'chrome-turbo.db')}`);
+
+// Migrate from legacy JSON if the DB is empty
+try {
+  const count = (db.prepare('SELECT COUNT(*) as n FROM custom_tools').get() as any).n;
+  if (count === 0) {
+    const legacyPath = resolve(__dirname, '..', 'custom-tools.json');
+    if (existsSync(legacyPath)) {
+      const data: CustomTool[] = JSON.parse(readFileSync(legacyPath, 'utf8'));
+      const insert = db.prepare(
+        'INSERT OR IGNORE INTO custom_tools (name, description, code, params, system_prompt, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      );
+      const migrate = db.transaction((tools: CustomTool[]) => {
+        for (const t of tools) {
+          insert.run(t.name, t.description, t.code, JSON.stringify(t.params), t.systemPrompt ?? null, t.createdAt);
+        }
+      });
+      migrate(data);
+      log(`Migrated ${data.length} custom tool(s) from legacy JSON`);
+    }
+  }
+} catch (e: any) {
+  log(`Migration check: ${e.message}`);
+}
+
+// Prepared statements — SQLite handles locking, no in-memory cache needed
+const stmts = {
+  upsert: db.prepare(
+    'INSERT INTO custom_tools (name, description, code, params, system_prompt, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET description=excluded.description, code=excluded.code, params=excluded.params, system_prompt=excluded.system_prompt'
+  ),
+  get: db.prepare('SELECT * FROM custom_tools WHERE name = ?'),
+  all: db.prepare('SELECT * FROM custom_tools ORDER BY created_at'),
+  delete: db.prepare('DELETE FROM custom_tools WHERE name = ?'),
+  count: db.prepare('SELECT COUNT(*) as n FROM custom_tools'),
+};
+
+function rowToTool(row: any): CustomTool {
+  return {
+    name: row.name,
+    description: row.description,
+    code: row.code,
+    params: JSON.parse(row.params),
+    systemPrompt: row.system_prompt ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+function getTool(name: string): CustomTool | undefined {
+  const row = stmts.get.get(name);
+  return row ? rowToTool(row) : undefined;
+}
+
+function getAllTools(): CustomTool[] {
+  return stmts.all.all().map(rowToTool);
+}
+
+function saveTool(tool: CustomTool): void {
+  stmts.upsert.run(tool.name, tool.description, tool.code, JSON.stringify(tool.params), tool.systemPrompt ?? null, tool.createdAt);
+}
+
+function deleteTool(name: string): boolean {
+  return stmts.delete.run(name).changes > 0;
+}
+
+function toolCount(): number {
+  return (stmts.count.get() as any).n;
 }
 
 // --- create_tool ---
@@ -661,8 +738,7 @@ mcp.registerTool(
       systemPrompt,
       createdAt: new Date().toISOString(),
     };
-    customTools.set(name, tool);
-    saveCustomTools();
+    saveTool(tool);
     log(`Custom tool created: ${name}`);
     return text({
       created: name,
@@ -686,9 +762,9 @@ mcp.registerTool(
     }),
   },
   async ({ name, args, tabId, question }) => {
-    const tool = customTools.get(name);
+    const tool = getTool(name);
     if (!tool) {
-      const available = [...customTools.keys()];
+      const available = getAllTools().map(t => t.name);
       throw new Error(`Custom tool '${name}' not found. Available: ${available.join(', ') || 'none'}`);
     }
     const code = `(async function(params) { ${tool.code} })(${JSON.stringify(args || {})})`;
@@ -712,7 +788,8 @@ mcp.registerTool(
     inputSchema: z.object({}),
   },
   async () => {
-    const tools = [...customTools.values()].map(t => ({
+    const all = getAllTools();
+    const tools = all.map(t => ({
       name: t.name,
       description: t.description,
       params: t.params,
@@ -734,17 +811,14 @@ mcp.registerTool(
     }),
   },
   async ({ name }) => {
-    if (!customTools.has(name)) throw new Error(`Custom tool '${name}' not found`);
-    customTools.delete(name);
-    saveCustomTools();
+    if (!deleteTool(name)) throw new Error(`Custom tool '${name}' not found`);
     log(`Custom tool deleted: ${name}`);
-    return text({ deleted: name, remaining: customTools.size });
+    return text({ deleted: name, remaining: toolCount() });
   },
 );
 
 // ─── Start ───
 
-loadCustomTools();
 initHaiku();
 spawnNative();
 const transport = new StdioServerTransport();
