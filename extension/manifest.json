@@ -3,7 +3,7 @@
   "name": "Chrome Turbo MCP",
   "version": "1.0.0",
   "description": "Turbo browser control via MCP — fast screenshots, DOM OCR, spatial awareness",
-  "permissions": ["tabs", "activeTab", "scripting", "debugger", "alarms"],
+  "permissions": ["tabs", "activeTab", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",

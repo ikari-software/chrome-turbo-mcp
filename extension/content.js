@@ -18,14 +18,10 @@
       const parent = cur.parentElement;
       if (parent) {
         const sibs = parent.children;
-        let idx = 0, count = 0;
-        for (let j = 0; j < sibs.length; j++) {
-          if (sibs[j].tagName === cur.tagName) {
-            count++;
-            if (sibs[j] === cur) idx = count;
-          }
+        if (sibs.length > 1) {
+          const idx = Array.prototype.indexOf.call(sibs, cur) + 1;
+          s += ':nth-child(' + idx + ')';
         }
-        if (count > 1) s += ':nth-of-type(' + idx + ')';
       }
       parts.unshift(s);
       cur = parent;
@@ -407,9 +403,12 @@
 
   // --- YAML Structure: semantic page representation ---
   // More logical than HTML, strips noise, shows structure + content + spatial info
-  function getPageStructure({ selector, maxDepth = 6, visibleOnly = true }) {
+  function getPageStructure({ selector, maxDepth = 6, visibleOnly = true, timeLimitMs = 5000 }) {
     const root = selector ? document.querySelector(selector) : document.body;
     if (!root) throw new Error('Element not found: ' + selector);
+
+    const deadline = Date.now() + timeLimitMs;
+    let timedOut = false;
 
     const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'META', 'LINK', 'BR', 'HR']);
     const SEMANTIC = new Set(['HEADER', 'NAV', 'MAIN', 'ARTICLE', 'SECTION', 'ASIDE', 'FOOTER', 'FORM', 'DIALOG', 'TABLE']);
@@ -471,6 +470,8 @@
     }
 
     function processNode(el, indent, depth) {
+      if (timedOut) return;
+      if (Date.now() > deadline) { timedOut = true; return; }
       if (depth > maxDepth) return;
       if (SKIP.has(el.tagName)) return;
       if (el.nodeType !== Node.ELEMENT_NODE) return;
@@ -585,7 +586,7 @@
       processNode(child, 0, 0);
     }
 
-    return { yaml: lines.join('\n'), viewport: vp };
+    return { yaml: lines.join('\n'), viewport: vp, timedOut };
   }
 
   // --- Execute arbitrary JS in page context ---

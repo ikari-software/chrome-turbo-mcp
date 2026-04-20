@@ -1,0 +1,559 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const wsPort = 18321
+
+// BrowserConnection represents a connected Chrome/Arc/Brave/Edge extension.
+type BrowserConnection struct {
+	conn   *websocket.Conn
+	name   string
+	tabIDs map[int]struct{}
+	mu     sync.Mutex // protects conn writes
+}
+
+type pendingRequest struct {
+	resultCh chan json.RawMessage
+	errCh    chan error
+	timer    *time.Timer
+}
+
+var (
+	browsers   = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu sync.RWMutex
+
+	pending   = make(map[string]*pendingRequest)
+	pendingMu sync.Mutex
+
+	nextID atomic.Int64
+
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			// Allow connections with no Origin header (e.g. Chrome extensions, CLI tools)
+			if origin == "" {
+				return true
+			}
+			// Allow localhost origins only
+			for _, allowed := range []string{
+				"http://127.0.0.1", "http://localhost",
+				"https://127.0.0.1", "https://localhost",
+				"chrome-extension://",
+			} {
+				if len(origin) >= len(allowed) && origin[:len(allowed)] == allowed {
+					return true
+				}
+			}
+			logger.Printf("WebSocket connection rejected: origin %q not allowed", origin)
+			return false
+		},
+	}
+
+	// Relay client state (used by MCP instances connecting to the daemon).
+	relayConn *websocket.Conn
+	relayMu   sync.Mutex // protects relayConn writes
+	useRelay  bool       // set once at startup, not changed after
+
+	// relayClients tracks connected MCP relay clients (daemon only).
+	relayClients   = make(map[*websocket.Conn]struct{})
+	relayClientsMu sync.Mutex
+)
+
+// --- Daemon mode: runs the WS server as a standalone singleton ---
+
+// RunDaemon starts the WebSocket server in daemon mode.
+// It serves browser extension connections on / and MCP relay connections on /relay.
+func RunDaemon() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleWSConnection)
+	mux.HandleFunc("/relay", handleRelayConnection)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", wsPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("port %d already in use (daemon already running?): %w", wsPort, err)
+	}
+
+	logger.Printf("Daemon WebSocket server on ws://%s", addr)
+	return http.Serve(ln, mux)
+}
+
+// handleRelayConnection handles a MCP instance connecting as a relay client.
+func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Printf("Relay upgrade error: %v", err)
+		return
+	}
+
+	relayClientsMu.Lock()
+	relayClients[conn] = struct{}{}
+	count := len(relayClients)
+	relayClientsMu.Unlock()
+	logger.Printf("MCP relay client connected (%d client(s))", count)
+
+	defer func() {
+		relayClientsMu.Lock()
+		delete(relayClients, conn)
+		remaining := len(relayClients)
+		relayClientsMu.Unlock()
+		conn.Close()
+		logger.Printf("MCP relay client disconnected (%d client(s) remaining)", remaining)
+	}()
+
+	// Use a mutex for this specific conn's writes since multiple goroutines respond.
+	var writeMu sync.Mutex
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		var req struct {
+			ID      string         `json:"id"`
+			Action  string         `json:"action"`
+			Params  map[string]any `json:"params,omitempty"`
+			Timeout int            `json:"timeout"`
+		}
+		if json.Unmarshal(message, &req) != nil || req.ID == "" {
+			continue
+		}
+
+		go func(reqID, action string, params map[string]any, timeout int) {
+			result, err := sendDirect(action, params, timeout)
+			var resp []byte
+			if err != nil {
+				resp, _ = json.Marshal(map[string]any{"id": reqID, "error": err.Error()})
+			} else {
+				resp, _ = json.Marshal(map[string]any{"id": reqID, "result": result})
+			}
+			writeMu.Lock()
+			conn.WriteMessage(websocket.TextMessage, resp)
+			writeMu.Unlock()
+		}(req.ID, req.Action, req.Params, req.Timeout)
+	}
+}
+
+// --- MCP instance mode: connect to daemon as relay client ---
+
+// startWebSocket connects to the daemon as a relay client.
+// If the daemon isn't running, it spawns one first.
+func startWebSocket() {
+	if err := ensureDaemon(); err != nil {
+		logger.Printf("Failed to ensure daemon: %v", err)
+		// Fall back to running WS server in-process (legacy single-instance mode).
+		startInProcess()
+		return
+	}
+
+	useRelay = true
+	go connectRelay()
+}
+
+// startInProcess runs the WS server in-process (fallback for when daemon can't start).
+func startInProcess() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleWSConnection)
+	addr := fmt.Sprintf("127.0.0.1:%d", wsPort)
+	logger.Printf("WebSocket server on ws://%s (in-process)", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Printf("WebSocket server error: %v", err)
+	}
+}
+
+// connectRelay connects to the daemon's /relay endpoint with reconnection.
+func connectRelay() {
+	url := fmt.Sprintf("ws://127.0.0.1:%d/relay", wsPort)
+	backoff := 200 * time.Millisecond
+	maxBackoff := 5 * time.Second
+
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			// Daemon may have died — try restarting it.
+			if restartErr := ensureDaemon(); restartErr != nil {
+				logger.Printf("Relay connect failed, daemon restart failed: %v", restartErr)
+			}
+			logger.Printf("Relay connect failed: %v (retry in %v)", err, backoff)
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff = backoff * 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+
+		backoff = 200 * time.Millisecond
+		relayMu.Lock()
+		relayConn = conn
+		relayMu.Unlock()
+		logger.Printf("Connected to daemon as relay client")
+
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				logger.Printf("Relay connection lost: %v", err)
+				break
+			}
+			var msg struct {
+				ID     string          `json:"id"`
+				Result json.RawMessage `json:"result,omitempty"`
+				Error  string          `json:"error,omitempty"`
+			}
+			if json.Unmarshal(message, &msg) != nil || msg.ID == "" {
+				continue
+			}
+
+			pendingMu.Lock()
+			p, ok := pending[msg.ID]
+			if ok {
+				delete(pending, msg.ID)
+			}
+			pendingMu.Unlock()
+
+			if ok {
+				p.timer.Stop()
+				if msg.Error != "" {
+					p.errCh <- errors.New(msg.Error)
+				} else {
+					p.resultCh <- msg.Result
+				}
+			}
+		}
+
+		relayMu.Lock()
+		relayConn = nil
+		relayMu.Unlock()
+		conn.Close()
+		time.Sleep(backoff)
+	}
+}
+
+// --- Browser connection handling (daemon only) ---
+
+func handleWSConnection(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Printf("WebSocket upgrade error: %v", err)
+		return
+	}
+
+	bc := &BrowserConnection{
+		conn:   conn,
+		name:   fmt.Sprintf("browser-%d", len(browsers)+1),
+		tabIDs: make(map[int]struct{}),
+	}
+
+	browsersMu.Lock()
+	browsers[conn] = bc
+	count := len(browsers)
+	browsersMu.Unlock()
+	logger.Printf("Extension connected (%d browser(s) total)", count)
+
+	defer func() {
+		browsersMu.Lock()
+		delete(browsers, conn)
+		remaining := len(browsers)
+		browsersMu.Unlock()
+		conn.Close()
+		logger.Printf("Extension disconnected (%d browser(s) remaining)", remaining)
+	}()
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg struct {
+			ID     string          `json:"id"`
+			Result json.RawMessage `json:"result,omitempty"`
+			Error  string          `json:"error,omitempty"`
+		}
+		if json.Unmarshal(message, &msg) != nil || msg.ID == "" {
+			continue
+		}
+
+		pendingMu.Lock()
+		p, ok := pending[msg.ID]
+		if ok {
+			delete(pending, msg.ID)
+		}
+		pendingMu.Unlock()
+
+		if ok {
+			p.timer.Stop()
+			if msg.Error != "" {
+				p.errCh <- errors.New(msg.Error)
+			} else {
+				p.resultCh <- msg.Result
+			}
+		}
+	}
+}
+
+func getOpenBrowsers() []*BrowserConnection {
+	browsersMu.RLock()
+	defer browsersMu.RUnlock()
+	var open []*BrowserConnection
+	for _, bc := range browsers {
+		open = append(open, bc)
+	}
+	return open
+}
+
+// --- Send functions ---
+
+// sendTo sends a command to a specific browser and waits for the response.
+func sendTo(bc *BrowserConnection, action string, params map[string]any, timeoutMs int) (json.RawMessage, error) {
+	id := strconv.FormatInt(nextID.Add(1), 10)
+	resultCh := make(chan json.RawMessage, 1)
+	errCh := make(chan error, 1)
+
+	timer := time.AfterFunc(time.Duration(timeoutMs)*time.Millisecond, func() {
+		pendingMu.Lock()
+		if p, ok := pending[id]; ok {
+			delete(pending, id)
+			p.errCh <- fmt.Errorf("timeout after %dms: %s", timeoutMs, action)
+		}
+		pendingMu.Unlock()
+	})
+
+	req := &pendingRequest{resultCh: resultCh, errCh: errCh, timer: timer}
+	pendingMu.Lock()
+	pending[id] = req
+	pendingMu.Unlock()
+
+	msg, _ := json.Marshal(map[string]any{"id": id, "action": action, "params": params})
+	bc.mu.Lock()
+	err := bc.conn.WriteMessage(websocket.TextMessage, msg)
+	bc.mu.Unlock()
+	if err != nil {
+		timer.Stop()
+		pendingMu.Lock()
+		delete(pending, id)
+		pendingMu.Unlock()
+		return nil, fmt.Errorf("websocket write error: %w", err)
+	}
+
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case err := <-errCh:
+		return nil, err
+	}
+}
+
+// sendViaRelay forwards a command through the relay connection to the daemon.
+func sendViaRelay(action string, params map[string]any, timeoutMs int) (json.RawMessage, error) {
+	relayMu.Lock()
+	conn := relayConn
+	relayMu.Unlock()
+	if conn == nil {
+		return nil, errors.New("Not connected to daemon. Waiting for reconnect.")
+	}
+
+	id := strconv.FormatInt(nextID.Add(1), 10)
+	resultCh := make(chan json.RawMessage, 1)
+	errCh := make(chan error, 1)
+
+	timer := time.AfterFunc(time.Duration(timeoutMs)*time.Millisecond, func() {
+		pendingMu.Lock()
+		if p, ok := pending[id]; ok {
+			delete(pending, id)
+			p.errCh <- fmt.Errorf("timeout after %dms: %s (via relay)", timeoutMs, action)
+		}
+		pendingMu.Unlock()
+	})
+
+	req := &pendingRequest{resultCh: resultCh, errCh: errCh, timer: timer}
+	pendingMu.Lock()
+	pending[id] = req
+	pendingMu.Unlock()
+
+	msg, _ := json.Marshal(map[string]any{
+		"id":      id,
+		"action":  action,
+		"params":  params,
+		"timeout": timeoutMs,
+	})
+	relayMu.Lock()
+	err := conn.WriteMessage(websocket.TextMessage, msg)
+	relayMu.Unlock()
+	if err != nil {
+		timer.Stop()
+		pendingMu.Lock()
+		delete(pending, id)
+		pendingMu.Unlock()
+		return nil, fmt.Errorf("relay write error: %w", err)
+	}
+
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case err := <-errCh:
+		return nil, err
+	}
+}
+
+// send routes a command to the browser(s), either via relay or directly.
+func send(action string, params map[string]any, timeoutMs ...int) (json.RawMessage, error) {
+	timeout := 30000
+	if len(timeoutMs) > 0 {
+		timeout = timeoutMs[0]
+	}
+
+	if useRelay {
+		return sendViaRelay(action, params, timeout)
+	}
+
+	return sendDirect(action, params, timeout)
+}
+
+// sendDirect routes a command directly to browsers (daemon mode or in-process fallback).
+func sendDirect(action string, params map[string]any, timeout int) (json.RawMessage, error) {
+	open := getOpenBrowsers()
+	if len(open) == 0 {
+		// Try auto-launching a browser
+		if browserConfig != nil && browserConfig.AutoLaunch {
+			if _, err := launchBrowser(false); err != nil {
+				logger.Printf("Auto-launch failed: %v", err)
+			} else {
+				open = getOpenBrowsers()
+			}
+		}
+	}
+	if len(open) == 0 {
+		return nil, errors.New("No browser extensions connected. Install the extension and ensure a browser is open.")
+	}
+
+	// list_tabs: query all browsers, merge results
+	if action == "list_tabs" {
+		return sendListTabs(open, timeout)
+	}
+
+	// If tabId specified, route to owning browser
+	if params != nil {
+		if tabIDRaw, ok := params["tabId"]; ok && tabIDRaw != nil {
+			tabID := toInt(tabIDRaw)
+			return sendToTab(open, tabID, action, params, timeout)
+		}
+	}
+
+	// No tabId — use first browser
+	return sendTo(open[0], action, params, timeout)
+}
+
+// sendListTabs fans out list_tabs to all browsers and merges results.
+func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, error) {
+	type result struct {
+		tabs []json.RawMessage
+	}
+	results := make([]result, len(open))
+	var wg sync.WaitGroup
+
+	for i, bc := range open {
+		wg.Add(1)
+		go func(i int, bc *BrowserConnection) {
+			defer wg.Done()
+			raw, err := sendTo(bc, "list_tabs", nil, timeout)
+			if err != nil {
+				return
+			}
+			var tabs []json.RawMessage
+			if json.Unmarshal(raw, &tabs) == nil {
+				results[i] = result{tabs: tabs}
+				// Cache tab IDs
+				for _, t := range tabs {
+					var tab struct {
+						ID int `json:"id"`
+					}
+					if json.Unmarshal(t, &tab) == nil {
+						bc.mu.Lock()
+						bc.tabIDs[tab.ID] = struct{}{}
+						bc.mu.Unlock()
+					}
+				}
+			}
+		}(i, bc)
+	}
+	wg.Wait()
+
+	// Detect browser names
+	for _, bc := range open {
+		go func(bc *BrowserConnection) {
+			raw, err := sendTo(bc, "execute_js", map[string]any{"code": "navigator.userAgent"}, 3000)
+			if err != nil {
+				return
+			}
+			var resp struct {
+				Result string `json:"result"`
+			}
+			if json.Unmarshal(raw, &resp) == nil {
+				ua := resp.Result
+				bc.mu.Lock()
+				switch {
+				case contains(ua, "Arc"):
+					bc.name = "Arc"
+				case contains(ua, "Brave"):
+					bc.name = "Brave"
+				case contains(ua, "Edg"):
+					bc.name = "Edge"
+				case contains(ua, "Chrome"):
+					bc.name = "Chrome"
+				}
+				bc.mu.Unlock()
+			}
+		}(bc)
+	}
+
+	// Merge all tabs
+	var all []json.RawMessage
+	for _, r := range results {
+		all = append(all, r.tabs...)
+	}
+	merged, _ := json.Marshal(all)
+	return merged, nil
+}
+
+// sendToTab routes a command to the browser that owns the given tab ID.
+func sendToTab(open []*BrowserConnection, tabID int, action string, params map[string]any, timeout int) (json.RawMessage, error) {
+	// Check cached ownership
+	for _, bc := range open {
+		bc.mu.Lock()
+		_, owns := bc.tabIDs[tabID]
+		bc.mu.Unlock()
+		if owns {
+			return sendTo(bc, action, params, timeout)
+		}
+	}
+	// Not cached — try each browser
+	for _, bc := range open {
+		result, err := sendTo(bc, action, params, timeout)
+		if err != nil {
+			if contains(err.Error(), "No tab") || contains(err.Error(), "Cannot access") {
+				continue
+			}
+			return nil, err
+		}
+		bc.mu.Lock()
+		bc.tabIDs[tabID] = struct{}{}
+		bc.mu.Unlock()
+		return result, nil
+	}
+	return nil, fmt.Errorf("Tab %d not found in any connected browser", tabID)
+}

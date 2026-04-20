@@ -5,9 +5,17 @@ const WS_URL = 'ws://127.0.0.1:18321';
 let ws = null;
 let reconnectDelay = 500;
 
+// --- Constants ---
+const MAX_ACTIVITY_LOG = 100;
+const SCREENSHOT_FOCUS_DELAY_MS = 150;
+const CONTENT_SCRIPT_INIT_DELAY_MS = 50;
+const NATIVE_HEALTH_TIMEOUT_MS = 200;
+const NATIVE_RESIZE_TIMEOUT_MS = 5000;
+const NATIVE_RECHECK_INTERVAL_MS = 30000;
+
 // --- Telemetry & popup communication ---
 const stats = { commands: 0, errors: 0, totalMs: 0, startedAt: Date.now() };
-const activityLog = []; // last 100 entries
+const activityLog = []; // last MAX_ACTIVITY_LOG entries
 const popupPorts = new Set();
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -43,7 +51,7 @@ function broadcast(msg) {
 
 function logActivity(entry) {
   activityLog.push(entry);
-  if (activityLog.length > 100) activityLog.shift();
+  if (activityLog.length > MAX_ACTIVITY_LOG) activityLog.shift();
   broadcast({ type: 'activity', ...entry });
 }
 
@@ -104,7 +112,10 @@ function connect() {
 
   ws.onmessage = async (event) => {
     let msg;
-    try { msg = JSON.parse(event.data); } catch { return; }
+    try { msg = JSON.parse(event.data); } catch (e) {
+      console.warn('[turbo] Malformed WS message:', e.message, event.data?.substring?.(0, 200));
+      return;
+    }
 
     const cmdId = msg.id;
     const start = performance.now();
@@ -153,6 +164,7 @@ chrome.tabs.onActivated.addListener(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) connect();
 });
 
+
 // --- Resolve tab ID (use active tab if not specified) ---
 async function resolveTab(tabId) {
   if (tabId) return tabId;
@@ -170,8 +182,7 @@ async function ensureContentScript(tabId) {
       target: { tabId },
       files: ['content.js'],
     });
-    // Small delay for script to initialize
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, CONTENT_SCRIPT_INIT_DELAY_MS));
   }
 }
 
@@ -192,66 +203,6 @@ async function toContent(tabId, action, params = {}) {
   });
 }
 
-// --- CDP (Chrome DevTools Protocol) for real input events ---
-// Solves the MUI Autocomplete problem: synthetic JS events don't work on portal elements.
-// CDP sends real OS-level events that are indistinguishable from user interaction.
-
-const debuggerAttached = new Set(); // tabIds with debugger attached
-
-async function ensureDebugger(tabId) {
-  if (debuggerAttached.has(tabId)) return;
-  try {
-    await chrome.debugger.attach({ tabId }, '1.3');
-    debuggerAttached.add(tabId);
-    // Clean up when tab closes
-    chrome.tabs.onRemoved.addListener(function onRemoved(id) {
-      if (id === tabId) {
-        debuggerAttached.delete(tabId);
-        chrome.tabs.onRemoved.removeListener(onRemoved);
-      }
-    });
-  } catch (e) {
-    // Already attached or can't attach
-    if (e.message?.includes('Already attached')) debuggerAttached.add(tabId);
-    else throw e;
-  }
-}
-
-async function cdpSend(tabId, method, params = {}) {
-  await ensureDebugger(tabId);
-  return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(result);
-    });
-  });
-}
-
-// Real click at exact coordinates via CDP. modifiers: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
-async function cdpClick(tabId, x, y, modifiers = 0) {
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
-}
-
-// Real keyboard typing via CDP — types each character as a real keypress
-async function cdpType(tabId, text) {
-  for (const char of text) {
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: char, key: char, code: 'Key' + char.toUpperCase() });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char, code: 'Key' + char.toUpperCase() });
-  }
-}
-
-// Real key press (Enter, ArrowDown, Escape, Backspace, etc.)
-async function cdpKey(tabId, key, code, keyCode) {
-  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: keyCode });
-  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode });
-}
-
-// Scroll a specific element or the page
-async function cdpScroll(tabId, x, y, deltaX, deltaY) {
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY });
-}
-
 // --- Screenshot with resize ---
 // Tries native Go resizer first (http://127.0.0.1:18322), falls back to OffscreenCanvas
 const NATIVE_URL = 'http://127.0.0.1:18322';
@@ -260,13 +211,12 @@ let nativeAvailable = null; // null = unknown, true/false = cached
 async function checkNative() {
   if (nativeAvailable !== null) return nativeAvailable;
   try {
-    const r = await fetch(NATIVE_URL + '/health', { signal: AbortSignal.timeout(200) });
+    const r = await fetch(NATIVE_URL + '/health', { signal: AbortSignal.timeout(NATIVE_HEALTH_TIMEOUT_MS) });
     nativeAvailable = r.ok;
   } catch {
     nativeAvailable = false;
   }
-  // Re-check every 30s
-  setTimeout(() => { nativeAvailable = null; }, 30000);
+  setTimeout(() => { nativeAvailable = null; }, NATIVE_RECHECK_INTERVAL_MS);
   return nativeAvailable;
 }
 
@@ -275,7 +225,7 @@ async function resizeNative(base64, maxWidth, quality) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: base64, maxWidth, quality }),
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(NATIVE_RESIZE_TIMEOUT_MS),
   });
   return await resp.json(); // { data, width, height }
 }
@@ -305,21 +255,29 @@ async function resizeLocal(dataUrl, maxWidth, quality) {
   return { data: btoa(binary), width: w, height: h };
 }
 
+/**
+ * Capture a screenshot via captureVisibleTab (extension fallback when BiDi is unavailable).
+ * Requires focusing the tab. BiDi screenshots (from Go server) are preferred.
+ * @param {number} [tabId] - Tab to capture (defaults to active tab)
+ * @param {number} [maxWidth=1280] - Maximum width in pixels for the resized image
+ * @param {number} [quality=70] - JPEG quality (0-100)
+ * @returns {{ base64: string, width: number, height: number, mimeType: string }}
+ */
 async function screenshot(tabId, maxWidth = 1280, quality = 70) {
   const tid = await resolveTab(tabId);
+
   const tab = await chrome.tabs.get(tid);
   await chrome.windows.update(tab.windowId, { focused: true });
   await chrome.tabs.update(tid, { active: true });
-  await new Promise(r => setTimeout(r, 80));
+  await new Promise(r => setTimeout(r, SCREENSHOT_FOCUS_DELAY_MS));
 
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
     format: 'jpeg',
-    quality: Math.min(quality + 10, 100), // capture slightly higher, resizer compresses
+    quality: Math.min(quality + 10, 100),
   });
 
   let result;
   if (await checkNative()) {
-    // Native Go resizer — ~5x faster than OffscreenCanvas
     const raw = dataUrl.split(',')[1];
     try {
       result = await resizeNative(raw, maxWidth, quality);
@@ -402,7 +360,16 @@ async function adaptScript(tabId, code, persist = false) {
   return results[0]?.result || { error: 'No result' };
 }
 
-// --- Command dispatcher ---
+/**
+ * Main command dispatcher. Routes incoming WS actions to the appropriate handler:
+ * - Background-handled: list_tabs, navigate, screenshot, execute_js, adapt_script, turbo_snapshot
+ * - Content-script bridge: extract_text, click, type_text, scroll, get_html, etc.
+ * - CDP real-input: cdp_click, cdp_type, cdp_key, cdp_scroll
+ * - CDP monitoring: network_*, console_*, cookies, performance, accessibility
+ * @param {string} action - The command name
+ * @param {Object} params - Command parameters
+ * @returns {any} Command result
+ */
 async function dispatch(action, params) {
   switch (action) {
     // --- Background-handled commands ---
@@ -494,50 +461,6 @@ async function dispatch(action, params) {
 
     case 'inject_script':
       return await toContent(params.tabId, 'inject_script', { code: params.code });
-
-    // --- CDP real-input commands ---
-    case 'cdp_click': {
-      const tid = await resolveTab(params.tabId);
-      const modifiers = params.shift ? 8 : (params.modifiers || 0);
-      await cdpClick(tid, params.x, params.y, modifiers);
-      return { clicked: true, x: params.x, y: params.y, shift: !!params.shift };
-    }
-
-    case 'cdp_type': {
-      const tid = await resolveTab(params.tabId);
-      // Optionally clear first with select-all + delete
-      if (params.clear) {
-        await cdpKey(tid, 'a', 'KeyA', 65); // Ctrl+A — need modifier
-        // Actually use Select All shortcut
-        await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 8 }); // 8 = Meta (Cmd on Mac)
-        await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
-        await cdpKey(tid, 'Backspace', 'Backspace', 8);
-        await new Promise(r => setTimeout(r, 50));
-      }
-      await cdpType(tid, params.text);
-      return { typed: params.text.length };
-    }
-
-    case 'cdp_key': {
-      const tid = await resolveTab(params.tabId);
-      const keyMap = {
-        'Enter': { code: 'Enter', keyCode: 13 },
-        'Escape': { code: 'Escape', keyCode: 27 },
-        'ArrowDown': { code: 'ArrowDown', keyCode: 40 },
-        'ArrowUp': { code: 'ArrowUp', keyCode: 38 },
-        'Backspace': { code: 'Backspace', keyCode: 8 },
-        'Tab': { code: 'Tab', keyCode: 9 },
-      };
-      const k = keyMap[params.key] || { code: params.key, keyCode: 0 };
-      await cdpKey(tid, params.key, k.code, k.keyCode);
-      return { pressed: params.key };
-    }
-
-    case 'cdp_scroll': {
-      const tid = await resolveTab(params.tabId);
-      await cdpScroll(tid, params.x || 600, params.y || 400, params.deltaX || 0, params.deltaY || 0);
-      return { scrolled: true };
-    }
 
     default:
       throw new Error('Unknown action: ' + action);
