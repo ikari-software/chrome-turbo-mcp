@@ -130,10 +130,9 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	}
 	text := toString(args["text"])
 	if toBool(args["clear"]) {
-		// Select all + delete via BiDi key actions
-		bidiKey(ctx, ctxID, "Meta") // hold
-		bidiKey(ctx, ctxID, "a")
-		bidiKey(ctx, ctxID, "Backspace")
+		if err := bidiSelectAllClear(ctx, ctxID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 	if err := bidiType(ctx, ctxID, text); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

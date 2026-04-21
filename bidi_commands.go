@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"sync"
 )
 
 // =============================================================================
@@ -195,6 +197,45 @@ func bidiKey(ctx context.Context, contextID string, key string) error {
 	return err
 }
 
+// bidiKeyboardRawActions sends a custom key action sequence (modifier chords, etc.).
+func bidiKeyboardRawActions(ctx context.Context, contextID string, actions []map[string]any) error {
+	c, err := requireBiDi()
+	if err != nil {
+		return err
+	}
+	_, err = c.Send(ctx, "input.performActions", map[string]any{
+		"context": contextID,
+		"actions": []map[string]any{
+			{
+				"type":    "key",
+				"id":      "keyboard",
+				"actions": actions,
+			},
+		},
+	})
+	return err
+}
+
+// bidiSelectAllClear selects all text in the focused field and deletes it (Ctrl/Cmd+A, Backspace).
+func bidiSelectAllClear(ctx context.Context, contextID string) error {
+	mod := "Control"
+	if runtime.GOOS == "darwin" {
+		mod = "Meta"
+	}
+	modVal := keyToUnicode(mod)
+	aVal := "a"
+	bk := keyToUnicode("Backspace")
+	actions := []map[string]any{
+		{"type": "keyDown", "value": modVal},
+		{"type": "keyDown", "value": aVal},
+		{"type": "keyUp", "value": aVal},
+		{"type": "keyUp", "value": modVal},
+		{"type": "keyDown", "value": bk},
+		{"type": "keyUp", "value": bk},
+	}
+	return bidiKeyboardRawActions(ctx, contextID, actions)
+}
+
 func bidiScroll(ctx context.Context, contextID string, x, y, deltaX, deltaY float64) error {
 	c, err := requireBiDi()
 	if err != nil {
@@ -231,9 +272,9 @@ func bidiEvaluate(ctx context.Context, contextID string, expression string) (jso
 		return nil, err
 	}
 	raw, err := c.Send(ctx, "script.evaluate", map[string]any{
-		"expression":    expression,
-		"target":        map[string]any{"context": contextID},
-		"awaitPromise":  true,
+		"expression":      expression,
+		"target":          map[string]any{"context": contextID},
+		"awaitPromise":    true,
 		"resultOwnership": "none",
 	})
 	if err != nil {
@@ -325,20 +366,30 @@ func bidiDeleteCookies(ctx context.Context, name, domain string) error {
 // Network commands
 // =============================================================================
 
+var (
+	bidiSubscribeMu             sync.Mutex
+	bidiNetworkSubscribedClient *BiDiClient
+	bidiConsoleSubscribedClient *BiDiClient
+)
+
 func bidiNetworkEnable(ctx context.Context) (string, error) {
 	c, err := requireBiDi()
 	if err != nil {
 		return "", err
 	}
-	// Subscribe to network events
-	err = c.Subscribe(ctx, []string{
-		"network.beforeRequestSent",
-		"network.responseStarted",
-		"network.responseCompleted",
-		"network.fetchError",
-	})
-	if err != nil {
-		return "", err
+	bidiSubscribeMu.Lock()
+	defer bidiSubscribeMu.Unlock()
+	if bidiNetworkSubscribedClient != c {
+		err = c.Subscribe(ctx, []string{
+			"network.beforeRequestSent",
+			"network.responseStarted",
+			"network.responseCompleted",
+			"network.fetchError",
+		})
+		if err != nil {
+			return "", err
+		}
+		bidiNetworkSubscribedClient = c
 	}
 	return "bidi-network", nil
 }
@@ -401,21 +452,20 @@ type BiDiLogEntry struct {
 	Source    string `json:"source,omitempty"`
 }
 
-func bidiSubscribeConsole(ctx context.Context, handler func(BiDiLogEntry)) error {
+// bidiConsoleSubscribeOnce subscribes to log events once per BiDi client (idempotent).
+func bidiConsoleSubscribeOnce(ctx context.Context) error {
 	c, err := requireBiDi()
 	if err != nil {
 		return err
 	}
-	err = c.Subscribe(ctx, []string{"log.entryAdded"})
-	if err != nil {
-		return err
-	}
-	c.OnEvent("log.entryAdded", func(_ string, params json.RawMessage) {
-		var entry BiDiLogEntry
-		if json.Unmarshal(params, &entry) == nil {
-			handler(entry)
+	bidiSubscribeMu.Lock()
+	defer bidiSubscribeMu.Unlock()
+	if bidiConsoleSubscribedClient != c {
+		if err := c.Subscribe(ctx, []string{"log.entryAdded"}); err != nil {
+			return err
 		}
-	})
+		bidiConsoleSubscribedClient = c
+	}
 	return nil
 }
 

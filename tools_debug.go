@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -258,15 +259,26 @@ func bidiOrFallback(action string, bidiHandler server.ToolHandlerFunc) server.To
 // =============================================================================
 
 // --- Network monitoring state (BiDi-side) ---
-var bidiNetworkEntries = make(map[string][]map[string]any) // contextID → entries
+var (
+	bidiNetworkMu              sync.Mutex
+	bidiConsoleMu              sync.Mutex
+	bidiNetworkEntries         = make(map[string][]map[string]any) // contextID → entries
+	bidiConsoleEntries         []BiDiLogEntry
+	bidiCollectorMu            sync.Mutex
+	bidiNetworkCollectorClient *BiDiClient
+	bidiConsoleCollectorClient *BiDiClient
+)
 
-func handleNetworkEnable(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	_, err := bidiNetworkEnable(ctx)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	// Register event handler to collect entries
+func ensureBidiNetworkCollector() {
 	c := getBiDi()
+	if c == nil {
+		return
+	}
+	bidiCollectorMu.Lock()
+	defer bidiCollectorMu.Unlock()
+	if bidiNetworkCollectorClient == c {
+		return
+	}
 	c.OnEvent("network.beforeRequestSent", func(_ string, params json.RawMessage) {
 		var ev struct {
 			Context string `json:"context"`
@@ -288,18 +300,30 @@ func handleNetworkEnable(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 				"method":    ev.Request.Method,
 				"timestamp": ev.Timestamp,
 			}
+			bidiNetworkMu.Lock()
 			bidiNetworkEntries["_all"] = append(bidiNetworkEntries["_all"], entry)
-			// Cap at 500
 			if len(bidiNetworkEntries["_all"]) > 500 {
 				bidiNetworkEntries["_all"] = bidiNetworkEntries["_all"][1:]
 			}
+			bidiNetworkMu.Unlock()
 		}
 	})
+	bidiNetworkCollectorClient = c
+}
+
+func handleNetworkEnable(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	_, err := bidiNetworkEnable(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	ensureBidiNetworkCollector()
 	return mcp.NewToolResultText(`{"enabled": true}`), nil
 }
 
 func handleNetworkGet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	entries := bidiNetworkEntries["_all"]
+	bidiNetworkMu.Lock()
+	entries := append([]map[string]any(nil), bidiNetworkEntries["_all"]...)
+	bidiNetworkMu.Unlock()
 	if entries == nil {
 		entries = []map[string]any{}
 	}
@@ -329,29 +353,51 @@ func handleNetworkGet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 }
 
 func handleNetworkDisable(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	bidiNetworkMu.Lock()
 	bidiNetworkEntries = make(map[string][]map[string]any)
+	bidiNetworkMu.Unlock()
 	return mcp.NewToolResultText(`{"disabled": true}`), nil
 }
 
-// --- Console monitoring state (BiDi-side) ---
-var bidiConsoleEntries []BiDiLogEntry
-
-func handleConsoleEnable(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	bidiConsoleEntries = nil
-	err := bidiSubscribeConsole(ctx, func(entry BiDiLogEntry) {
-		bidiConsoleEntries = append(bidiConsoleEntries, entry)
-		if len(bidiConsoleEntries) > 200 {
-			bidiConsoleEntries = bidiConsoleEntries[1:]
+func ensureBidiConsoleCollector() {
+	c := getBiDi()
+	if c == nil {
+		return
+	}
+	bidiCollectorMu.Lock()
+	defer bidiCollectorMu.Unlock()
+	if bidiConsoleCollectorClient == c {
+		return
+	}
+	c.OnEvent("log.entryAdded", func(_ string, params json.RawMessage) {
+		var entry BiDiLogEntry
+		if json.Unmarshal(params, &entry) == nil {
+			bidiConsoleMu.Lock()
+			bidiConsoleEntries = append(bidiConsoleEntries, entry)
+			if len(bidiConsoleEntries) > 200 {
+				bidiConsoleEntries = bidiConsoleEntries[1:]
+			}
+			bidiConsoleMu.Unlock()
 		}
 	})
-	if err != nil {
+	bidiConsoleCollectorClient = c
+}
+
+func handleConsoleEnable(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	bidiConsoleMu.Lock()
+	bidiConsoleEntries = nil
+	bidiConsoleMu.Unlock()
+	if err := bidiConsoleSubscribeOnce(ctx); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	ensureBidiConsoleCollector()
 	return mcp.NewToolResultText(`{"enabled": true}`), nil
 }
 
 func handleConsoleGet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	entries := bidiConsoleEntries
+	bidiConsoleMu.Lock()
+	entries := append([]BiDiLogEntry(nil), bidiConsoleEntries...)
+	bidiConsoleMu.Unlock()
 	if entries == nil {
 		entries = []BiDiLogEntry{}
 	}
@@ -377,12 +423,16 @@ func handleConsoleGet(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 }
 
 func handleConsoleClear(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	bidiConsoleMu.Lock()
 	bidiConsoleEntries = nil
+	bidiConsoleMu.Unlock()
 	return mcp.NewToolResultText(`{"cleared": true}`), nil
 }
 
 func handleConsoleDisable(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	bidiConsoleMu.Lock()
 	bidiConsoleEntries = nil
+	bidiConsoleMu.Unlock()
 	return mcp.NewToolResultText(`{"disabled": true}`), nil
 }
 

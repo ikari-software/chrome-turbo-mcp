@@ -22,7 +22,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- connection_status ---
 	s.AddTool(
 		mcp.NewTool("connection_status",
-			mcp.WithDescription("Check if the Chrome extension is connected to the MCP server"),
+			mcp.WithDescription("Check if the browser extension and/or BiDi are connected to the MCP server"),
 		),
 		handleConnectionStatus,
 	)
@@ -93,12 +93,12 @@ func handleConnectionStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.Call
 		b.mu.Unlock()
 	}
 	return textResult(map[string]any{
-		"connected":       len(open) > 0 || getBiDi() != nil,
-		"extension":       len(open) > 0,
-		"bidi":            getBiDi() != nil,
-		"browsers":        names,
-		"extensionCount":  len(open),
-		"wsPort":          wsPort,
+		"connected":      len(open) > 0 || getBiDi() != nil,
+		"extension":      len(open) > 0,
+		"bidi":           getBiDi() != nil,
+		"browsers":       names,
+		"extensionCount": len(open),
+		"wsPort":         wsPort,
 	})
 }
 
@@ -106,6 +106,9 @@ func handleListTabs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResu
 	raw, err := send("list_tabs", nil)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if getBiDi() != nil {
+		_ = ingestExtensionTabsForBiDi(raw)
 	}
 	return mcp.NewToolResultText(string(raw)), nil
 }
