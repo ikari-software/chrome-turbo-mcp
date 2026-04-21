@@ -19,8 +19,11 @@
       if (parent) {
         const sibs = parent.children;
         if (sibs.length > 1) {
-          const idx = Array.prototype.indexOf.call(sibs, cur) + 1;
-          s += ':nth-child(' + idx + ')';
+          const same = Array.from(sibs).filter(node => node.tagName === cur.tagName);
+          if (same.length > 1) {
+            const idx = same.indexOf(cur) + 1;
+            s += ':nth-of-type(' + idx + ')';
+          }
         }
       }
       parts.unshift(s);

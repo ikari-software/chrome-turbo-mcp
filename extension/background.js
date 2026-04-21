@@ -203,6 +203,74 @@ async function toContent(tabId, action, params = {}) {
   });
 }
 
+// --- Legacy CDP real-input fallback helpers (used by tests and extension fallback mode) ---
+const CDP_MOD_SHIFT = 8;
+const attachedTabs = new Set();
+
+async function ensureDebugger(tabId) {
+  const tid = await resolveTab(tabId);
+  if (attachedTabs.has(tid)) return tid;
+  try {
+    await chrome.debugger.attach({ tabId: tid }, '1.3');
+    attachedTabs.add(tid);
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (!/already attached/i.test(msg)) throw e;
+    attachedTabs.add(tid);
+  }
+  return tid;
+}
+
+async function cdpSend(tabId, method, params = {}) {
+  const tid = await ensureDebugger(tabId);
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand({ tabId: tid }, method, params, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(result || {});
+      }
+    });
+  });
+}
+
+async function cdpClick(tabId, x, y, shift = false) {
+  const modifiers = shift ? CDP_MOD_SHIFT : 0;
+  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
+  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
+  return { clicked: true, x, y, shift: !!shift };
+}
+
+async function cdpType(tabId, text = '') {
+  for (const ch of String(text)) {
+    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch });
+    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch });
+  }
+  return { typed: text.length };
+}
+
+async function cdpKey(tabId, key) {
+  const keyMap = {
+    Enter: 'Enter',
+    Escape: 'Escape',
+    Tab: 'Tab',
+    Backspace: 'Backspace',
+    ArrowDown: 'ArrowDown',
+    ArrowUp: 'ArrowUp',
+    ArrowLeft: 'ArrowLeft',
+    ArrowRight: 'ArrowRight',
+  };
+  const k = keyMap[key] || key;
+  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key: k });
+  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: k });
+  return { pressed: k };
+}
+
+async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600) {
+  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY });
+  return { scrolled: true };
+}
+
 // --- Screenshot with resize ---
 // Tries native Go resizer first (http://127.0.0.1:18322), falls back to OffscreenCanvas
 const NATIVE_URL = 'http://127.0.0.1:18322';
@@ -409,6 +477,16 @@ async function dispatch(action, params) {
       ]);
       return { screenshot: shot, interactiveMap: map };
     }
+
+    // --- CDP real-input commands (extension fallback path) ---
+    case 'cdp_click':
+      return await cdpClick(params.tabId, params.x, params.y, params.shift);
+    case 'cdp_type':
+      return await cdpType(params.tabId, params.text);
+    case 'cdp_key':
+      return await cdpKey(params.tabId, params.key);
+    case 'cdp_scroll':
+      return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY);
 
     // --- Content-script commands ---
     case 'extract_text':
