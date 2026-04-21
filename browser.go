@@ -113,6 +113,9 @@ func launchBrowser(headless bool) (int, error) {
 		browserName = "Firefox"
 	}
 	logger.Printf("Launched %s (pid %d, debug port %d)", browserName, pid, debugPort)
+	if firefox && extPath != "" {
+		logger.Printf("Firefox: unpacked extension cannot be auto-loaded from CLI; install %s once via about:debugging (This Firefox).", extPath)
+	}
 
 	// Connect BiDi in the background (non-blocking)
 	go connectBiDiWithRetry(debugPort)

@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -10,40 +15,59 @@ import (
 // The MCP tool API uses integer tabIds; BiDi uses opaque string context IDs.
 // This bridge lets tools keep their existing tabId-based interface.
 var (
-	tabToContext   = make(map[int]string) // tabId → contextID
-	contextToTab   = make(map[string]int) // contextID → tabId
-	contextURLs    = make(map[string]string) // contextID → URL
-	contextMapMu   sync.RWMutex
-	nextSyntheticTab int = 100000 // synthetic tab IDs for contexts without a real tab ID
+	tabToContext           = make(map[int]string) // tabId → contextID
+	contextToTab           = make(map[string]int) // contextID → tabId
+	contextURLs            = make(map[string]string)
+	contextMapMu           sync.RWMutex
+	nextSyntheticTab       = 100000 // synthetic tab IDs for contexts without a real tab ID
+	defaultBrowsingContext string   // first top-level context from last getTree (stable default)
 )
 
 // resolveContext translates a tabId (from MCP tool params) to a BiDi browsing context ID.
-// If tabId is 0 or nil, returns the first (most recently active) context.
+// If tabId is 0 or nil, returns the default top-level context from the last tree refresh.
 func resolveContext(tabId any) (string, error) {
 	if err := requireBiDiErr(); err != nil {
 		return "", err
 	}
 
-	id := toInt(tabId)
+	id := intOr(tabId, 0)
 
-	// Refresh context map
 	if err := refreshContextMap(); err != nil {
 		return "", fmt.Errorf("context refresh: %w", err)
 	}
 
-	contextMapMu.RLock()
-	defer contextMapMu.RUnlock()
-
-	if id > 0 {
-		if ctx, ok := tabToContext[id]; ok {
-			return ctx, nil
+	tryLookup := func() (string, bool) {
+		contextMapMu.RLock()
+		defer contextMapMu.RUnlock()
+		if id > 0 {
+			if ctx, ok := tabToContext[id]; ok {
+				return ctx, true
+			}
+			return "", false
 		}
-		return "", fmt.Errorf("no BiDi context for tab %d", id)
+		if defaultBrowsingContext != "" {
+			return defaultBrowsingContext, true
+		}
+		ids := sortedContextIDs()
+		if len(ids) > 0 {
+			return ids[0], true
+		}
+		return "", false
 	}
 
-	// No tabId specified — return first top-level context
-	for ctxID := range contextURLs {
-		return ctxID, nil
+	if id > 0 {
+		if ctx, ok := tryLookup(); ok {
+			return ctx, nil
+		}
+		_ = syncTabContextFromExtension()
+		if ctx, ok := tryLookup(); ok {
+			return ctx, nil
+		}
+		return "", fmt.Errorf("no BiDi context for tab %d (try list_tabs to refresh tab↔context mapping)", id)
+	}
+
+	if ctx, ok := tryLookup(); ok {
+		return ctx, nil
 	}
 	return "", fmt.Errorf("no browsing contexts available")
 }
@@ -59,32 +83,169 @@ func refreshContextMap() error {
 	if err != nil {
 		return err
 	}
+	applyContextTree(contexts)
+	return nil
+}
 
+func applyContextTree(contexts []BiDiContextInfo) {
 	contextMapMu.Lock()
 	defer contextMapMu.Unlock()
 
-	// Clear and rebuild
 	for k := range contextURLs {
 		delete(contextURLs, k)
 	}
 
+	validCtx := make(map[string]bool)
 	for _, ctx := range contexts {
+		validCtx[ctx.Context] = true
 		contextURLs[ctx.Context] = ctx.URL
+		for _, child := range ctx.Children {
+			validCtx[child.Context] = true
+			contextURLs[child.Context] = child.URL
+		}
+	}
 
-		// If we don't already have a tab mapping for this context, create a synthetic one
+	for ctxID := range contextToTab {
+		if !validCtx[ctxID] {
+			tabID := contextToTab[ctxID]
+			delete(tabToContext, tabID)
+			delete(contextToTab, ctxID)
+		}
+	}
+
+	for _, ctx := range contexts {
 		if _, exists := contextToTab[ctx.Context]; !exists {
 			nextSyntheticTab++
 			synth := nextSyntheticTab
 			tabToContext[synth] = ctx.Context
 			contextToTab[ctx.Context] = synth
 		}
+	}
 
-		// Recurse into children (iframes, etc.)
-		for _, child := range ctx.Children {
-			contextURLs[child.Context] = child.URL
+	if len(contexts) > 0 {
+		defaultBrowsingContext = contexts[0].Context
+	} else {
+		defaultBrowsingContext = ""
+	}
+}
+
+func sortedContextIDs() []string {
+	out := make([]string, 0, len(contextURLs))
+	for id := range contextURLs {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// syncTabContextFromExtension pulls list_tabs from the extension and maps tab IDs to BiDi contexts.
+func syncTabContextFromExtension() error {
+	if getBiDi() == nil {
+		return errors.New("BiDi not connected")
+	}
+	raw, err := send("list_tabs", nil)
+	if err != nil {
+		return err
+	}
+	return ingestExtensionTabsForBiDi(raw)
+}
+
+// ingestExtensionTabsForBiDi matches extension tabs to top-level BiDi contexts by URL (grouped, order-stable).
+func ingestExtensionTabsForBiDi(raw json.RawMessage) error {
+	if getBiDi() == nil {
+		return nil
+	}
+
+	type extTab struct {
+		ID     int    `json:"id"`
+		URL    string `json:"url"`
+		Active bool   `json:"active"`
+	}
+	var tabs []extTab
+	if err := json.Unmarshal(raw, &tabs); err != nil {
+		return err
+	}
+
+	if err := refreshContextMap(); err != nil {
+		return err
+	}
+
+	contexts, err := bidiGetTree(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// Group by normalized URL → extension tabs (sorted by id for stable pairing).
+	tabByURL := make(map[string][]extTab)
+	for _, t := range tabs {
+		if t.ID == 0 || t.URL == "" {
+			continue
+		}
+		u := normalizeURL(t.URL)
+		if u == "" {
+			continue
+		}
+		tabByURL[u] = append(tabByURL[u], t)
+	}
+	for u := range tabByURL {
+		sort.Slice(tabByURL[u], func(i, j int) bool { return tabByURL[u][i].ID < tabByURL[u][j].ID })
+	}
+
+	// Top-level BiDi contexts only (one main frame per tab).
+	ctxByURL := make(map[string][]string)
+	for _, ctx := range contexts {
+		u := normalizeURL(ctx.URL)
+		if u == "" {
+			continue
+		}
+		ctxByURL[u] = append(ctxByURL[u], ctx.Context)
+	}
+
+	contextMapMu.Lock()
+	defer contextMapMu.Unlock()
+
+	for u, tlist := range tabByURL {
+		clist := ctxByURL[u]
+		n := min(len(tlist), len(clist))
+		for i := 0; i < n; i++ {
+			registerTabContextLocked(tlist[i].ID, clist[i])
 		}
 	}
+
+	// Prefer active tab when it still has no mapping: map to first unmatched top-level context with same URL.
+	var active extTab
+	for _, t := range tabs {
+		if t.Active && t.ID != 0 && t.URL != "" {
+			active = t
+			break
+		}
+	}
+	if active.ID != 0 {
+		if _, ok := tabToContext[active.ID]; !ok {
+			au := normalizeURL(active.URL)
+			for _, ctx := range contexts {
+				if normalizeURL(ctx.URL) != au {
+					continue
+				}
+				oldTab, has := contextToTab[ctx.Context]
+				// Prefer replacing synthetic tab IDs with the active extension tab.
+				if !has || oldTab > 100000 {
+					registerTabContextLocked(active.ID, ctx.Context)
+					break
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+func registerTabContextLocked(tabID int, contextID string) {
+	if oldTab, exists := contextToTab[contextID]; exists && oldTab != tabID {
+		delete(tabToContext, oldTab)
+	}
+	tabToContext[tabID] = contextID
+	contextToTab[contextID] = tabID
 }
 
 // registerTabContext associates a real extension tab ID with a BiDi context ID.
@@ -92,14 +253,23 @@ func refreshContextMap() error {
 func registerTabContext(tabID int, contextID string) {
 	contextMapMu.Lock()
 	defer contextMapMu.Unlock()
+	registerTabContextLocked(tabID, contextID)
+}
 
-	// Remove any previous synthetic mapping for this context
-	if oldTab, exists := contextToTab[contextID]; exists && oldTab != tabID {
-		delete(tabToContext, oldTab)
+func normalizeURL(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return ""
 	}
-
-	tabToContext[tabID] = contextID
-	contextToTab[contextID] = tabID
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	parsed.Fragment = ""
+	if parsed.Scheme != "" && parsed.Host != "" && parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String()
 }
 
 // getContextList returns all known contexts with their URLs and tab IDs.
@@ -107,8 +277,10 @@ func getContextList() []map[string]any {
 	contextMapMu.RLock()
 	defer contextMapMu.RUnlock()
 
+	ids := sortedContextIDs()
 	var out []map[string]any
-	for ctxID, url := range contextURLs {
+	for _, ctxID := range ids {
+		url := contextURLs[ctxID]
 		entry := map[string]any{
 			"context": ctxID,
 			"url":     url,
