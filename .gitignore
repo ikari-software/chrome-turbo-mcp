@@ -1,4 +1,20 @@
-node_modules/
-dist/
+# Build output
 bin/
+dist/
+node_modules/
 *.tsbuildinfo
+
+# Stray top-level binary (built when running `go build` without -o)
+/chrome-turbo-mcp
+
+# Test artifacts
+extension/coverage/
+
+# Opendoor-specific PDF disclosure form data — not infrastructure
+current-mappings.json
+custom-tools.json
+disclosure_data_model_fields.json
+field_mapping_plan.json
+field_positions.json
+live-mappings.json
+nc_disclosure_training_transcript.txt
