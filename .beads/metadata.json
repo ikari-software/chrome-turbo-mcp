@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "turboweb_mcp",
+  "project_id": "3838c7c5-4095-4900-b92d-d667ebbcfe5c"
+}

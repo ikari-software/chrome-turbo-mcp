@@ -19,3 +19,8 @@ field_mapping_plan.json
 field_positions.json
 live-mappings.json
 nc_disclosure_training_transcript.txt
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
