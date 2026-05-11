@@ -23,16 +23,25 @@
   // at the thing the agent meant to click.
   function sel(el) {
     if (!el || !el.tagName) return '';
+    // Local helper: true iff `s` matches exactly one element AND that
+    // element is the target. Used to confirm uniqueness at each level
+    // of the walk-up chain below.
+    const isUnique = (s) => {
+      try {
+        const m = document.querySelectorAll(s);
+        return m.length === 1 && m[0] === el;
+      } catch { return false; }
+    };
     // Best case: element itself has an id.
     if (el.id) {
       const trial = '#' + CSS.escape(el.id);
-      if (selectorMatchesOnly(trial, el)) return trial;
+      if (isUnique(trial)) return trial;
     }
     // Next best: data-testid on the element.
     const tid = el.getAttribute && el.getAttribute('data-testid');
     if (tid) {
       const trial = `[data-testid=${JSON.stringify(tid)}]`;
-      if (selectorMatchesOnly(trial, el)) return trial;
+      if (isUnique(trial)) return trial;
     }
 
     const parts = [];
@@ -61,7 +70,7 @@
       // After each prepend, re-check uniqueness. Done as soon as it
       // resolves to exactly our target.
       const trial = parts.join('>');
-      if (selectorMatchesOnly(trial, el)) return trial;
+      if (isUnique(trial)) return trial;
 
       // An id-bearing ancestor anchors the chain. Going further only
       // adds a redundant prefix.
@@ -74,15 +83,6 @@
     // the longest chain we built — better than nothing, and consistent
     // with the chain the agent will use to re-resolve.
     return parts.join('>');
-  }
-
-  function selectorMatchesOnly(selector, target) {
-    try {
-      const matches = document.querySelectorAll(selector);
-      return matches.length === 1 && matches[0] === target;
-    } catch {
-      return false;
-    }
   }
 
   // --- Viewport info (included in many responses) ---
@@ -723,9 +723,16 @@
     // human a beat to register the final intent before it disappears.
     const BADGE_TASK_END_GRACE_MS = 1_800;
 
-    // Set of in-flight command IDs. Populated by showStart('start'),
-    // drained by showResult/showError. Badge stays up while non-empty.
+    // Set of in-flight command IDs. Populated by showStart, drained by
+    // showResult/showError. Badge stays up while non-empty.
+    //
+    // Bounded so a long-running session with cancelled / navigation-
+    // dropped tool calls (start delivered, result never arrives) can't
+    // grow this without bound. The 60s ceiling timer ALSO clears the
+    // set, so even a stranded id only delays the next grace-fade by at
+    // most BADGE_MAX_LIFETIME_MS.
     const activeTasks = new Set();
+    const MAX_ACTIVE_TASKS = 200;
 
     // Mouse-proximity state. Updated on document.mousemove (passive,
     // rAF-coalesced); badge + toast opacity is recomputed each frame
@@ -733,6 +740,13 @@
     let mouseX = -10000, mouseY = -10000;
     let proximityRafPending = false;
     let proximityInstalled = false;
+    // AbortController for the document-level mousemove listener so it
+    // can be torn down on pagehide (no listener leaks across SPA route
+    // changes that keep the document alive).
+    let proximityAbortController = null;
+    // Tracks the showError's "remove .error class" timer so back-to-back
+    // errors don't strip the red shake mid-frame on the second one.
+    let errorTimer = null;
 
     function robotSVG(size = 14, color = '#d29922') {
       return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
@@ -1034,21 +1048,47 @@
     // markTaskStart / markTaskEnd track the set of in-flight commands so
     // the badge stays visible as long as the agent is actively doing
     // something. The grace period after the last task gives the human a
-    // beat to read the final intent before the badge fades.
+    // beat to read the final intent before the badge fades. Defensive
+    // against out-of-order start/end delivery and stranded ids.
     function markTaskStart(id) {
       if (!id) return;
       activeTasks.add(id);
+      // Evict oldest if we hit the cap — a stranded id (start delivered
+      // but result lost to navigation/cancellation) can't accumulate.
+      if (activeTasks.size > MAX_ACTIVE_TASKS) {
+        const oldest = activeTasks.values().next().value;
+        if (oldest !== undefined) activeTasks.delete(oldest);
+      }
       clearTimeout(badgeTimer);
-      badgeTimer = setTimeout(() => badge && badge.classList.remove('on'), BADGE_MAX_LIFETIME_MS);
+      // Hard ceiling on badge — also clear the Set when it fires so a
+      // single stranded id doesn't permanently demote the grace-fade
+      // behaviour ("size===0" path) for the rest of the session.
+      badgeTimer = setTimeout(() => {
+        if (badge) badge.classList.remove('on');
+        activeTasks.clear();
+      }, BADGE_MAX_LIFETIME_MS);
     }
     function markTaskEnd(id) {
       if (!id) return;
+      // chrome.tabs.sendMessage doesn't guarantee ordering across two
+      // separate calls — if `result` is delivered before `start`,
+      // markTaskEnd would no-op then markTaskStart would add the id
+      // permanently. Guard by remembering recently-ended ids and
+      // dropping any subsequent start for them.
       activeTasks.delete(id);
+      recentlyEndedTasks.add(id);
+      if (recentlyEndedTasks.size > MAX_ACTIVE_TASKS) {
+        const oldest = recentlyEndedTasks.values().next().value;
+        if (oldest !== undefined) recentlyEndedTasks.delete(oldest);
+      }
       if (activeTasks.size === 0) {
         clearTimeout(badgeTimer);
         badgeTimer = setTimeout(() => badge && badge.classList.remove('on'), BADGE_TASK_END_GRACE_MS);
       }
     }
+    // Ids whose end was already observed — used to ignore late starts
+    // that arrive out-of-order with their matching end.
+    const recentlyEndedTasks = new Set();
 
     function moveCursorTo(x, y, opts = {}) {
       ensure();
@@ -1290,6 +1330,8 @@
     // by waving the mouse over it.
     function installProximityListener() {
       if (proximityInstalled) return;
+      proximityAbortController = new AbortController();
+      const signal = proximityAbortController.signal;
       document.addEventListener('mousemove', (e) => {
         mouseX = e.clientX;
         mouseY = e.clientY;
@@ -1299,22 +1341,31 @@
           proximityRafPending = false;
           updateProximityOpacity();
         });
-      }, { passive: true, capture: true });
+      }, { passive: true, capture: true, signal });
+      // Clean up on pagehide so SPA/extension reloads don't leak
+      // listeners. addEventListener with a signal removes itself when
+      // the controller aborts.
+      window.addEventListener('pagehide', () => proximityAbortController?.abort(), { once: true, signal });
       proximityInstalled = true;
     }
     function updateProximityOpacity() {
+      // Two-pass: read all bounding rects first, then write all CSS
+      // vars. Avoids forcing a layout flush between the two elements
+      // (would happen if we interleaved read→write→read→write).
+      const targets = [];
       for (const el of [badge, toastEl]) {
-        if (!el) continue;
-        if (!el.classList.contains('on')) continue;
-        const r = el.getBoundingClientRect();
+        if (!el || !el.classList.contains('on')) continue;
+        targets.push({ el, rect: el.getBoundingClientRect() });
+      }
+      for (const { el, rect: r } of targets) {
         const dx = Math.max(0, r.left - mouseX, mouseX - r.right);
         const dy = Math.max(0, r.top - mouseY, mouseY - r.bottom);
         const dist = Math.hypot(dx, dy);
         // Piecewise: 0px → 0.15, 50px → 0.55, ≥150px → 0.95.
         let opacity;
         if (dist <= 0) opacity = 0.15;
-        else if (dist < 50) opacity = 0.15 + (dist / 50) * 0.40;        // 0.15 → 0.55
-        else if (dist < 150) opacity = 0.55 + ((dist - 50) / 100) * 0.40; // 0.55 → 0.95
+        else if (dist < 50) opacity = 0.15 + (dist / 50) * 0.40;
+        else if (dist < 150) opacity = 0.55 + ((dist - 50) / 100) * 0.40;
         else opacity = 0.95;
         el.style.setProperty('--proximity', opacity.toFixed(2));
       }
@@ -1363,32 +1414,49 @@
       return null;
     }
 
-    // Read-only ops that don't have a more specific visualisation in
-    // resolveTarget / showResult. We render a generic "agent is reading
-    // the page" sweep so the user sees *something* fire when these run —
-    // otherwise the popup activity row is the only signal.
-    const READ_SWEEP_ACTIONS = new Set([
-      'get_html', 'page_yaml', 'get_page_structure',
-      'dom_snapshot', 'get_accessibility_tree',
-      'query_elements',
+    // Read-only / state-only ops that don't have a specific cursor
+    // animation in resolveTarget. Each value picks which visual the
+    // overlay fires for that action:
+    //   - 'flash'  → viewport-wide camera flash (screenshot-ish)
+    //   - 'sweep'  → top-to-bottom scanline ("agent reading the page")
+    //   - 'pulse'  → small corner ring ("agent reading browser state")
+    const READ_ONLY_VISUALS = new Map([
+      // Camera flash for snapshot-style actions
+      ['screenshot',          'flash'],
+      ['turbo_snapshot',      'flash'],
+      // Page-DOM read → scanline sweep
+      ['get_html',            'sweep'],
+      ['page_yaml',           'sweep'],
+      ['get_page_structure',  'sweep'],
+      ['dom_snapshot',        'sweep'],
+      ['get_accessibility_tree', 'sweep'],
+      ['query_elements',      'sweep'],
+      // Browser-state read → corner pulse
+      ['get_cookies',         'pulse'],
+      ['set_cookie',          'pulse'],
+      ['delete_cookies',      'pulse'],
+      ['get_storage',         'pulse'],
+      ['network_get',         'pulse'],
+      ['network_enable',      'pulse'],
+      ['network_disable',     'pulse'],
+      ['network_get_body',    'pulse'],
+      ['network_throttle',    'pulse'],
+      ['console_get',         'pulse'],
+      ['console_enable',      'pulse'],
+      ['console_disable',     'pulse'],
+      ['console_clear',       'pulse'],
+      ['get_performance',     'pulse'],
+      ['css_coverage_start',  'pulse'],
+      ['css_coverage_stop',   'pulse'],
+      ['emulate_device',      'pulse'],
+      ['page_reload',         'pulse'],
     ]);
-    // Ops that touch browser state, not the page DOM. Visualised with a
-    // small corner pulse rather than a page-wide sweep — animating across
-    // the page would be misleading.
-    const DATA_PULSE_ACTIONS = new Set([
-      'get_cookies', 'set_cookie', 'delete_cookies',
-      'get_storage',
-      'network_get', 'network_enable', 'network_disable',
-      'network_get_body', 'network_throttle',
-      'console_get', 'console_enable', 'console_disable', 'console_clear',
-      'get_performance', 'css_coverage_start', 'css_coverage_stop',
-      'emulate_device', 'page_reload',
-    ]);
-    const CAMERA_FLASH_ACTIONS = new Set(['screenshot', 'turbo_snapshot']);
 
     async function showStart({ action, intent, clientLabel, clientType, params, id }) {
       try {
-        markTaskStart(id);
+        // Drop out-of-order delivery: if this id's matching end already
+        // arrived, the task isn't actually active.
+        if (!id || !recentlyEndedTasks.has(id)) markTaskStart(id);
         const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
         setBadge({ display, intent: intent || `${action}…` });
         if (intent) showToast(intent, display);
@@ -1405,15 +1473,15 @@
             flashAt(target.x, target.y, palette);
             if (target.bbox) highlightRect(target.bbox, palette);
           }
-        } else if (CAMERA_FLASH_ACTIONS.has(action)) {
+        } else {
           // turbo_snapshot also fires its element scan-flash via
           // showResult once the result comes back; the camera flash up
-          // front is the "the agent just photographed the page" beat.
-          cameraFlash();
-        } else if (READ_SWEEP_ACTIONS.has(action)) {
-          readSweep();
-        } else if (DATA_PULSE_ACTIONS.has(action)) {
-          dataPulse();
+          // front is the "agent just photographed the page" beat.
+          switch (READ_ONLY_VISUALS.get(action)) {
+            case 'flash': cameraFlash(); break;
+            case 'sweep': readSweep();   break;
+            case 'pulse': dataPulse();   break;
+          }
         }
       } catch (e) {
         // Overlay is non-critical; never throw upstream.
@@ -1460,7 +1528,10 @@
         if (cursor) {
           cursor.classList.add('on');
           cursor.classList.add('error');
-          setTimeout(() => cursor && cursor.classList.remove('error'), 600);
+          // Track the timer so back-to-back errors don't strip .error
+          // mid-shake on the second one.
+          clearTimeout(errorTimer);
+          errorTimer = setTimeout(() => cursor && cursor.classList.remove('error'), 600);
         }
         flashAt(cursorPos.x, cursorPos.y, actionPalette('__error'));
         const display = badge?.querySelector('.agent-name')?.textContent || 'agent';
