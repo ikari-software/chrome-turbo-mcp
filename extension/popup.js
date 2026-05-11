@@ -9,6 +9,11 @@ const port = chrome.runtime.connect({ name: 'popup' });
 // In-memory store of activity entries keyed by command id; the popup is
 // re-renderable from this map without losing detail when filters change.
 const entries = new Map();
+// Cap to keep long-running pop-out windows from accumulating thousands of
+// entries (each ~1 KB). When breached we evict the oldest insertion-order
+// entries; Map iteration order is insertion order so this is O(n) once and
+// then bounded forever after.
+const MAX_ENTRIES = 500;
 let filterText = '';
 
 port.onMessage.addListener((msg) => {
@@ -149,6 +154,13 @@ function renderActivity(data) {
   const existing = entries.get(data.id) || {};
   const merged = { ...existing, ...data };
   entries.set(data.id, merged);
+  // Evict oldest entries past the cap. Map keeps insertion order so the
+  // first key in the iterator is the oldest.
+  while (entries.size > MAX_ENTRIES) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
+  }
   rerenderLog();
 }
 
@@ -314,5 +326,11 @@ function formatUptime(ms) {
   return h + 'h' + (m % 60) + 'm';
 }
 
-// Refresh stats every second (for uptime counter)
-setInterval(() => port.postMessage({ type: 'getStats' }), 1000);
+// Refresh stats every second (for uptime counter). Clean up when the SW
+// recycles the port — otherwise the interval keeps firing into a dead
+// channel and throws "Attempting to use a disconnected port" forever.
+const statsTimer = setInterval(() => {
+  try { port.postMessage({ type: 'getStats' }); }
+  catch { clearInterval(statsTimer); }
+}, 1000);
+port.onDisconnect.addListener(() => clearInterval(statsTimer));

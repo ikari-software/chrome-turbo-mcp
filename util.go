@@ -90,20 +90,27 @@ func getBool(args map[string]any, key string, defaultVal bool) bool {
 	return defaultVal
 }
 
+// maxIntentLen caps the agent-supplied narration to a single line of
+// reasonable length. The model is asked for one short sentence; clamping
+// server-side prevents a misbehaving (or prompt-injected) agent from
+// drowning the popup/toast in a 5KB intent.
+const maxIntentLen = 200
+
 // rawArgs returns the arguments map suitable for forwarding to the extension
 // via the WS bridge. As a side-effect it pulls out the agent-supplied `intent`
-// field — a one-line natural-language description of what the agent is about
-// to do — and rewrites it as `_intent` so the extension popup and on-page
-// overlay can surface it to the human user. The original `intent` key is
-// removed so handlers never see it.
+// field, clamps it to maxIntentLen, and rewrites it as `_intent` so the
+// extension popup and on-page overlay can surface it to the human user.
+// The original `intent` key is removed so handlers never see it.
 func rawArgs(args map[string]any) map[string]any {
 	if args == nil {
 		return map[string]any{}
 	}
 	intent, hasIntent := args["intent"].(string)
 	if !hasIntent || intent == "" {
-		// Defensive copy avoided when there's nothing to rewrite.
 		return args
+	}
+	if len(intent) > maxIntentLen {
+		intent = intent[:maxIntentLen] + "…"
 	}
 	out := make(map[string]any, len(args))
 	for k, v := range args {

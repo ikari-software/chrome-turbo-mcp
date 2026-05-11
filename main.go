@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -106,17 +107,8 @@ func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc)
 			"description": intentParamDescription,
 		}
 	}
-	if !containsString(tool.InputSchema.Required, "intent") {
+	if !slices.Contains(tool.InputSchema.Required, "intent") {
 		tool.InputSchema.Required = append(tool.InputSchema.Required, "intent")
 	}
 	s.AddTool(tool, handler)
-}
-
-func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

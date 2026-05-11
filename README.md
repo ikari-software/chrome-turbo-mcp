@@ -1,24 +1,48 @@
 # turboweb-mcp-by-ikari
 
 A single-binary MCP server that drives a Chrome / Arc / Brave / Edge / Firefox
-tab through a companion browser extension and (optionally) WebDriver BiDi.
+tab through a companion browser extension and (optionally) WebDriver BiDi —
+with a live on-page agent overlay so a human user can watch what the agent is
+doing in real time.
 
 The MCP server speaks stdio to your editor (Claude Code, Cursor, Claude
 Desktop, etc.) and a WebSocket to the extension on `127.0.0.1:18321`. When
 WebDriver BiDi is available the same tools work cross-browser without an
 extension at all.
 
-Includes an on-page agent overlay (animated cursor, click ripple, intent
-toast) so a human user can watch what the agent is doing in real time
-without reading every tool-call dump.
+## What you get
+
+- **On-page agent overlay** — Shadow-DOM-isolated badge + animated cursor
+  (quadratic Bezier arc, ~470ms sin-eased) with a robot icon pinned to the
+  pointer. Per-action ripple colours (orange click, blue type, green scroll,
+  purple navigate, red error). Bounding-box highlight on the target. Real
+  DOM action is gated on cursor arrival so the click happens *at* the
+  cursor, not while it's still flying.
+- **Visualised read-only tools** — `find_text` and `extract_text` sweep a
+  glowing loupe across matches; `get_interactive_map` fires a scan-flash
+  outline over every interactive element on the page.
+- **Failure feedback** — on tool error the cursor turns red, shakes, fires
+  a red ripple, and a toast with the error message.
+- **Idle fade** — cursor + badge fade out after 45s of inactivity.
+- **Extension popup** with a Connected-agents section (every editor
+  driving the browser is listed by session label, with a robot icon and
+  client-type chip), expandable activity rows with intent, params, result
+  summary, and a filter input. A ⤢ Pop out button spawns a resizable
+  `chrome.windows.create` window with the same UI.
+- **`intent` argument** required on every tool — the model writes a
+  one-sentence narration before each call, surfaced as a toast on the
+  page and as the leading text of every activity row.
+- **Pluggable AI backend** for question-grounding on tool results: prefers
+  Anthropic Haiku when configured, falls back to Chrome's built-in
+  Gemini Nano (zero-cost, on-device) when not. See `TURBOWEB_AI_BACKEND`.
 
 ## Build
 
 ```bash
-make build         # → bin/turboweb-mcp-by-ikari
-make release       # cross-compile all four targets, see below, + extension zips
-make test          # go tests + extension vitest suite
-make watch         # rebuild extension/dist on every source change
+make build            # → bin/turboweb-mcp-by-ikari (+ legacy shim)
+make release          # cross-compile + extension zips
+make test             # go tests + extension vitest suite
+make watch            # rebuild extension/dist on every source change
 ```
 
 Release matrix:
@@ -56,16 +80,47 @@ Wire it into your MCP host (e.g. `~/.claude.json`):
 }
 ```
 
-Upgrading from `chrome-turbo-mcp`? A `bin/chrome-turbo-mcp` shim is
-shipped alongside the renamed binary — old configs pointing at that path
-keep working without edits. Custom-tool DB is migrated forward
-automatically on first run (non-destructive).
+### Upgrading from `chrome-turbo-mcp`
 
-Optional: set `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`) to enable Haiku
-preprocessing — any tool that takes a `question` argument will pipe its
-raw result through `claude-haiku-4-5` and return a concise answer.
+The project was renamed. To make the upgrade frictionless:
+
+- `make build` ships a `bin/chrome-turbo-mcp` shim that just `exec`s the
+  renamed binary, so existing `~/.claude.json` configs pointing at the
+  old path keep working without edits.
+- On first start, the custom-tool SQLite DB at
+  `~/.config/chrome-turbo-mcp/chrome-turbo.db` is copied forward to
+  `~/.config/turboweb-mcp-by-ikari/turboweb.db` non-destructively (old
+  file stays put so you can roll back).
+
+## Environment variables
+
+| Variable                | Default | Effect |
+| ----------------------- | ------- | ------ |
+| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | unset | Enable Haiku for question-grounding on `find_text`, `extract_text`, `inspect`, `describe`, `run_tool` |
+| `TURBOWEB_AI_BACKEND`   | `auto`  | `auto` (Haiku if key set, else Gemini Nano) · `haiku` · `local` · `none` |
+| `MCP_CLIENT_LABEL`      | derived | Override the session label shown in the extension popup |
+
+## AI backends
+
+Tools that accept a `question` argument can hand the raw result to a
+language model for a concise answer:
+
+- **Haiku** (`claude-haiku-4-5-20251001`) when `ANTHROPIC_API_KEY` is set.
+  Multimodal (handles `describe`'s screenshot), 80k-char context, fast.
+- **Chrome's built-in Gemini Nano** (`self.LanguageModel`) when Haiku
+  isn't configured *or* when `TURBOWEB_AI_BACKEND=local`. Runs on-device,
+  free, offline. Requires Chrome 138+ with the Prompt API flag enabled
+  and the Optimization Guide On Device Model downloaded (check
+  `chrome://components`). Text-only — screenshots are skipped when
+  falling back to local. ~12k-char context window.
+
+When neither backend is available, tools return raw structured data
+prefixed with `[AI unavailable — raw data follows]`. Nothing breaks.
 
 ## Tool surface
+
+Every tool also accepts a required **`intent`** argument — one short
+sentence describing what the agent is about to do.
 
 Browser & page: `connection_status`, `list_tabs`, `navigate`,
 `launch_browser`, `screenshot`, `turbo_snapshot`, `page_yaml`,
@@ -87,19 +142,24 @@ device emulation (`emulate_device`), `cdp_detach`.
 
 Custom tools (SQLite-backed, persistent): `create_tool`, `list_custom_tools`,
 `run_tool`, `delete_tool`. Custom tools wrap an `execute_js` body and an
-optional system prompt for Haiku post-processing.
+optional system prompt for the AI post-processor.
 
 ## Layout
 
 ```
 turboweb-mcp-by-ikari/
 ├── main.go, ws.go             # MCP stdio + extension WebSocket
+├── session.go                  # per-process session label + initialize hook
 ├── bidi*.go, browser.go       # WebDriver BiDi cross-browser path
-├── tools_*.go                 # MCP tool registrations
-├── haiku.go                   # Anthropic Haiku preprocessing
+├── tools_*.go                 # MCP tool registrations (addTool injects `intent`)
+├── haiku.go, local_ai.go      # Anthropic Haiku + Chrome Gemini Nano backends
 ├── resize.go                  # in-process JPEG resize for screenshots
 ├── daemon{,_unix,_windows}.go # daemon-relay mode for shared extensions
 └── extension/                 # Chrome MV3 extension (vitest suite under __tests__/)
+    ├── background.js          # WS bridge, overlay/AI dispatch, telemetry
+    ├── content.js             # DOM tools + Shadow-DOM overlay (cursor, ripple, loupe, toast)
+    ├── popup.{html,js}        # Connected-agents list, expandable activity log, pop-out window
+    └── build.js               # Source → dist/{chrome,firefox} (supports --watch)
 ```
 
 The Go binary runs in two modes:
@@ -107,7 +167,22 @@ The Go binary runs in two modes:
 - **MCP stdio** (default) — what your editor talks to.
 - **`--ws-server`** — long-lived daemon that owns port 18321; subsequent
   MCP processes connect to it via `/relay`. Useful if you run multiple
-  editors against a single browser.
+  editors against a single browser. The daemon attaches each connected
+  agent's label to outgoing commands so the extension popup can attribute
+  every action.
+
+## Security notes
+
+The WebSocket binds to localhost only and rejects non-localhost origins.
+That's the only auth boundary: any process that can open a localhost TCP
+socket on this user's machine can connect as a relay client and drive the
+browser. Don't run untrusted local code under the same user account
+while turboweb is running.
+
+The agent's `intent` text is self-reported, surfaced verbatim in the
+popup and toast. It's clamped to 200 chars server-side, but treat it as
+the model's claim about what it's doing — verify destructive actions in
+the activity-row params, not just by reading the intent.
 
 ## Architecture notes
 
@@ -117,3 +192,7 @@ JPEG resize. Both were retired in favour of the single Go binary, which
 already had cross-browser BiDi support, the same tool surface, and a
 proper daemon-relay mode. See the `Consolidate on Go` commit for the
 rationale.
+
+The project was renamed from `chrome-turbo-mcp` to `turboweb-mcp-by-ikari`
+once the BiDi path made it genuinely cross-browser; a back-compat shim
+and DB migration handle the transition.
