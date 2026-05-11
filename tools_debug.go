@@ -15,7 +15,7 @@ import (
 // These work identically in Chrome and Firefox — same protocol, same commands.
 func registerDebugTools(s *server.MCPServer) {
 	// --- Network monitoring ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("network_enable",
 			mcp.WithDescription("Start capturing network requests via BiDi. Requests are buffered and can be retrieved with network_get."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -24,7 +24,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("network_enable", handleNetworkEnable),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("network_get",
 			mcp.WithDescription("Get captured network requests. Call network_enable first."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -34,7 +34,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("network_get", handleNetworkGet),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("network_disable",
 			mcp.WithDescription("Stop capturing network requests."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -43,7 +43,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Console monitoring ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("console_enable",
 			mcp.WithDescription("Start capturing console messages via BiDi log events."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -52,7 +52,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("console_enable", handleConsoleEnable),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("console_get",
 			mcp.WithDescription("Get captured console messages. Call console_enable first."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -62,7 +62,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("console_get", handleConsoleGet),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("console_clear",
 			mcp.WithDescription("Clear captured console messages buffer."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -70,7 +70,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("console_clear", handleConsoleClear),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("console_disable",
 			mcp.WithDescription("Stop capturing console messages."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -79,7 +79,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Cookies ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_cookies",
 			mcp.WithDescription("Get all cookies for the current page."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -87,7 +87,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("get_cookies", handleGetCookies),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("set_cookie",
 			mcp.WithDescription("Set a browser cookie."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Cookie name")),
@@ -103,7 +103,7 @@ func registerDebugTools(s *server.MCPServer) {
 		bidiOrFallback("set_cookie", handleSetCookie),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("delete_cookies",
 			mcp.WithDescription("Delete cookies by name and domain."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Cookie name")),
@@ -114,7 +114,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Page reload ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("page_reload",
 			mcp.WithDescription("Reload the page. Use ignoreCache=true for hard reload."),
 			mcp.WithBoolean("ignoreCache", mcp.Description("Bypass cache (hard reload)")),
@@ -124,7 +124,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Emulation ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("emulate_device",
 			mcp.WithDescription("Emulate a viewport, user agent, or geolocation. Use disable=true to reset."),
 			mcp.WithNumber("width", mcp.Description("Viewport width (default 375)")),
@@ -139,7 +139,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- PDF generation ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("print_to_pdf",
 			mcp.WithDescription("Generate a PDF of the page. Returns base64-encoded PDF data."),
 			mcp.WithBoolean("landscape", mcp.Description("Landscape orientation")),
@@ -150,7 +150,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Script preload (bot detection patches, etc.) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("add_preload_script",
 			mcp.WithDescription("Inject JavaScript that runs before any page script on every navigation. Useful for bot-detection patches."),
 			mcp.WithString("code", mcp.Required(), mcp.Description("JavaScript code to inject")),
@@ -159,7 +159,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Storage ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_storage",
 			mcp.WithDescription("Get all localStorage or sessionStorage entries."),
 			mcp.WithString("type", mcp.Description("Storage type: 'local' or 'session' (default 'local')")),
@@ -169,7 +169,7 @@ func registerDebugTools(s *server.MCPServer) {
 	)
 
 	// --- Tools that fall back to extension (no BiDi-native equivalent yet) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("network_get_body",
 			mcp.WithDescription("Get the response body of a captured network request by its requestId."),
 			mcp.WithString("requestId", mcp.Required(), mcp.Description("Request ID from network_get results")),
@@ -178,7 +178,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("network_get_body"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_performance",
 			mcp.WithDescription("Get performance metrics: JS heap size, DOM nodes, layout count, etc."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -186,7 +186,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("get_performance"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_accessibility_tree",
 			mcp.WithDescription("Get the accessibility tree (AX tree) for the page."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -196,7 +196,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("get_accessibility_tree"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("network_throttle",
 			mcp.WithDescription("Simulate slow network conditions. Presets: 'slow-3g', 'fast-3g', 'offline'."),
 			mcp.WithString("preset", mcp.Description("Preset: slow-3g, fast-3g, offline")),
@@ -208,7 +208,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("network_throttle"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("dom_snapshot",
 			mcp.WithDescription("Capture a DOM snapshot with computed styles and layout rectangles."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -217,7 +217,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("dom_snapshot"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("css_coverage_start",
 			mcp.WithDescription("Start tracking CSS rule usage."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -225,7 +225,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("css_coverage_start"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("css_coverage_stop",
 			mcp.WithDescription("Stop CSS coverage tracking and get results."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -233,7 +233,7 @@ func registerDebugTools(s *server.MCPServer) {
 		passThrough("css_coverage_stop"),
 	)
 
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("cdp_detach",
 			mcp.WithDescription("Detach the debugger from a tab. Clears network/console captures."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),

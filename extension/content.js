@@ -1,4 +1,4 @@
-// Chrome Turbo MCP — Content Script
+// TurboWeb MCP by ikari — Content Script
 // Runs in every page. Handles DOM queries, spatial mapping, OCR, clicks, typing.
 // Communicates with background.js via chrome.runtime messages.
 
@@ -640,9 +640,595 @@
     });
   }
 
+  // --- Agent overlay -----------------------------------------------------
+  // A tiny on-page UI (Shadow-DOM-isolated) that shows the human user what
+  // the agent is doing in real time: a persistent badge in the top-right
+  // identifying who's driving, an animated cursor that moves to click
+  // targets with a sin-eased ease, a flash/highlight on the target, and a
+  // toast with the agent's stated intent. None of this is visible to the
+  // page itself (Shadow DOM, pointer-events: none).
+  const overlay = (() => {
+    let root = null;
+    let cursor = null;
+    let toastEl = null;
+    let badge = null;
+    let badgeTimer = null;
+    let toastTimer = null;
+    let idleFadeTimer = null;
+    let cursorPos = { x: window.innerWidth / 2, y: -40 };
+    // After this much agent inactivity the cursor and badge fade away so
+    // they don't permanently obscure the page.
+    const IDLE_FADE_MS = 45_000;
+
+    function robotSVG(size = 14, color = '#d29922') {
+      return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+        <rect x="3" y="5" width="10" height="8" rx="2"/>
+        <line x1="8" y1="5" x2="8" y2="3"/>
+        <circle cx="8" cy="2.5" r="0.7" fill="${color}"/>
+        <circle cx="6" cy="9" r="0.9" fill="${color}"/>
+        <circle cx="10" cy="9" r="0.9" fill="${color}"/>
+      </svg>`;
+    }
+
+    function ensure() {
+      if (root) return;
+      // Don't render the overlay inside iframes — only the top frame.
+      if (window.top !== window) return;
+
+      const host = document.createElement('div');
+      host.id = '__turbo_overlay_host';
+      host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
+      (document.body || document.documentElement).appendChild(host);
+
+      const sr = host.attachShadow({ mode: 'closed' });
+
+      const style = document.createElement('style');
+      style.textContent = `
+        :host, * { box-sizing: border-box; }
+        .badge {
+          position: fixed; top: 12px; right: 12px;
+          display: flex; align-items: center; gap: 6px;
+          padding: 5px 10px;
+          background: rgba(13, 17, 23, 0.92);
+          border: 1px solid #d29922;
+          border-radius: 16px;
+          color: #c9d1d9;
+          font: 11px/1.2 'SF Mono', Menlo, monospace;
+          backdrop-filter: blur(6px);
+          opacity: 0;
+          transition: opacity 200ms ease;
+          max-width: 360px;
+          pointer-events: none;
+        }
+        .badge.on { opacity: 1; }
+        .badge .agent-name { color: #d29922; font-weight: 600; flex-shrink: 0; }
+        .badge .label { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .badge svg { flex-shrink: 0; }
+        .cursor {
+          position: fixed; top: 0; left: 0;
+          width: 28px; height: 28px;
+          transform: translate(-1000px, -1000px);
+          will-change: transform;
+          pointer-events: none;
+          z-index: 10;
+          opacity: 0;
+          transition: opacity 200ms ease;
+          filter: drop-shadow(0 4px 8px rgba(0,0,0,0.4));
+        }
+        .cursor.on { opacity: 1; }
+        .cursor svg.pointer { width: 24px; height: 24px; }
+        .cursor .robot {
+          position: absolute;
+          top: 14px; left: 16px;
+          width: 22px; height: 22px;
+          background: #d29922;
+          border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+          border: 1.5px solid #0d1117;
+        }
+        .cursor.click .pointer { animation: clickPulse 350ms ease-out; }
+        @keyframes clickPulse {
+          0%   { transform: scale(1); }
+          40%  { transform: scale(0.78); }
+          100% { transform: scale(1); }
+        }
+        .ripple {
+          position: fixed;
+          border: 3px solid var(--ripple-ring, #d29922);
+          border-radius: 50%;
+          pointer-events: none;
+          animation: rippleAnim 600ms cubic-bezier(0.18, 0.7, 0.4, 1) forwards;
+        }
+        @keyframes rippleAnim {
+          0%   { width: 14px;  height: 14px;  margin-left: -7px;   margin-top: -7px;  opacity: 1;   border-width: 3px; }
+          100% { width: 130px; height: 130px; margin-left: -65px;  margin-top: -65px; opacity: 0;   border-width: 1px; }
+        }
+        .ripple-fill {
+          position: fixed;
+          border-radius: 50%;
+          pointer-events: none;
+          background: radial-gradient(circle, var(--ripple-fill, rgba(210, 153, 34, 0.55)), transparent 70%);
+          animation: rippleFill 420ms ease-out forwards;
+        }
+        @keyframes rippleFill {
+          0%   { width: 12px;  height: 12px;  margin-left: -6px;   margin-top: -6px;  opacity: 0.85; }
+          100% { width: 70px;  height: 70px;  margin-left: -35px;  margin-top: -35px; opacity: 0;    }
+        }
+        .highlight {
+          position: fixed;
+          border: 2px solid var(--highlight-color, #d29922);
+          border-radius: 4px;
+          pointer-events: none;
+          box-shadow: 0 0 18px var(--highlight-glow, rgba(210, 153, 34, 0.6));
+          animation: highlightFade 1100ms ease-out forwards;
+        }
+        @keyframes highlightFade {
+          0%   { opacity: 0.95; }
+          100% { opacity: 0; }
+        }
+        /* Loupe: a glowing ring shown over each match during read-only
+           scans (find_text, extract_text). Communicates "the agent looked
+           here" even though no actual click happens. */
+        .loupe {
+          position: fixed;
+          width: 64px; height: 64px;
+          margin-left: -32px; margin-top: -32px;
+          border: 3px solid #58a6ff;
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(88, 166, 255, 0.18), transparent 70%);
+          box-shadow: 0 0 14px rgba(88, 166, 255, 0.55), inset 0 0 8px rgba(88, 166, 255, 0.4);
+          pointer-events: none;
+          animation: loupeIn 360ms ease-out forwards;
+        }
+        @keyframes loupeIn {
+          0%   { opacity: 0;   transform: scale(0.55); }
+          45%  { opacity: 1;   transform: scale(1.1);  }
+          100% { opacity: 0;   transform: scale(1);    }
+        }
+        /* Scan-flash: a thin outline pulse drawn around every interactive
+           element after get_interactive_map, so the user sees "the agent
+           just enumerated everything you can click." */
+        .scan-flash {
+          position: fixed;
+          border: 1.5px solid rgba(88, 166, 255, 0.85);
+          border-radius: 3px;
+          pointer-events: none;
+          box-shadow: 0 0 6px rgba(88, 166, 255, 0.4);
+          animation: scanFlashAnim 700ms ease-out forwards;
+        }
+        @keyframes scanFlashAnim {
+          0%   { opacity: 0;   transform: scale(0.97); }
+          25%  { opacity: 1;   transform: scale(1.02); }
+          100% { opacity: 0;   transform: scale(1);    }
+        }
+        /* Failure shake + red tint: applied to the cursor when the tool
+           returns an error. The wrapper carries the position transform
+           via JS, so we shake the inner SVG instead to avoid clobbering
+           the cursor's coordinates. */
+        .cursor.error svg.pointer path { fill: #f85149; stroke: #4d1313; }
+        .cursor.error .robot { background: #f85149; box-shadow: 0 0 10px rgba(248, 81, 73, 0.7); }
+        .cursor.error svg.pointer { animation: shake 420ms ease-out; }
+        @keyframes shake {
+          0%, 100% { transform: translateX(0)  scale(1); }
+          15%      { transform: translateX(-5px) scale(1); }
+          30%      { transform: translateX(5px)  scale(1); }
+          45%      { transform: translateX(-4px) scale(1); }
+          60%      { transform: translateX(4px)  scale(1); }
+          80%      { transform: translateX(-2px) scale(1); }
+        }
+        .toast {
+          position: fixed;
+          bottom: 24px; left: 50%;
+          transform: translateX(-50%) translateY(20px);
+          padding: 8px 14px;
+          background: rgba(13, 17, 23, 0.92);
+          border: 1px solid #21262d;
+          border-radius: 6px;
+          color: #c9d1d9;
+          font: 12px/1.3 'SF Mono', Menlo, monospace;
+          opacity: 0;
+          transition: opacity 200ms ease, transform 200ms ease;
+          max-width: 80vw;
+          backdrop-filter: blur(6px);
+          pointer-events: none;
+          font-style: italic;
+        }
+        .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast .who { color: #d29922; font-weight: 600; font-style: normal; margin-right: 6px; }
+      `;
+
+      badge = document.createElement('div');
+      badge.className = 'badge';
+      badge.innerHTML = `
+        ${robotSVG(14, '#d29922')}
+        <span class="agent-name">Agent</span>
+        <span class="label">idle</span>
+      `;
+
+      cursor = document.createElement('div');
+      cursor.className = 'cursor';
+      cursor.innerHTML = `
+        <svg class="pointer" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 3 L5 19 L9.5 15 L11.6 21 L14.4 20 L12.3 14 L18 14 Z"
+                fill="#fff" stroke="#0d1117" stroke-width="1.4" stroke-linejoin="round"/>
+        </svg>
+        <div class="robot">${robotSVG(13, '#0d1117')}</div>
+      `;
+
+      toastEl = document.createElement('div');
+      toastEl.className = 'toast';
+
+      sr.appendChild(style);
+      sr.appendChild(badge);
+      sr.appendChild(cursor);
+      sr.appendChild(toastEl);
+
+      root = sr;
+    }
+
+    function setBadge({ display, intent }) {
+      ensure();
+      if (!badge) return;
+      badge.querySelector('.agent-name').textContent = display || 'Agent';
+      badge.querySelector('.label').textContent = intent || 'working…';
+      badge.classList.add('on');
+      clearTimeout(badgeTimer);
+      // Fade after a few seconds of inactivity so we don't permanently
+      // obscure the page.
+      badgeTimer = setTimeout(() => badge.classList.remove('on'), 7000);
+    }
+
+    function moveCursorTo(x, y, opts = {}) {
+      ensure();
+      if (!cursor) return Promise.resolve();
+      const start = { ...cursorPos };
+      const dx = x - start.x;
+      const dy = y - start.y;
+      const dist = Math.hypot(dx, dy);
+      // Quadratic Bezier control point: midpoint of the straight line
+      // pushed perpendicular to the motion direction so the cursor
+      // travels along a gentle arc instead of a straight diagonal —
+      // closer to how a human flicks the mouse than a robot's
+      // shortest-path teleport. The perpendicular `(dy, -dx) / dist`
+      // is the unit vector to the right of motion, so left→right hops
+      // bow upward, top→bottom hops bow rightward, and so on. Curve
+      // depth scales with sqrt(distance), capped at 80px.
+      const bow = dist > 0 ? Math.min(80, Math.sqrt(dist) * 3) : 0;
+      const perpX = dist > 0 ?  dy / dist : 0;
+      const perpY = dist > 0 ? -dx / dist : 0;
+      const midX = start.x + dx / 2 + perpX * bow;
+      const midY = start.y + dy / 2 + perpY * bow;
+      // Sin-eased motion: scale duration with sqrt(distance). Ensures
+      // short hops feel snappy and long traversals feel deliberate.
+      // ~1.5× faster than the original (147 / 12 / 600 vs 220 / 18 / 900).
+      const duration = opts.instant ? 0 : Math.min(600, 147 + Math.sqrt(dist) * 12);
+      const t0 = performance.now();
+      cursor.classList.add('on');
+
+      return new Promise((resolve) => {
+        function step(now) {
+          const t = duration === 0 ? 1 : Math.min(1, (now - t0) / duration);
+          // 0.5 - 0.5*cos(πt) is a half-cosine (sin) ease in/out: starts
+          // and ends slow, full speed at the midpoint. Feels like a
+          // human moving the mouse.
+          const eased = 0.5 - 0.5 * Math.cos(Math.PI * t);
+          // Quadratic Bezier B(u) = (1-u)²·P0 + 2(1-u)u·P1 + u²·P2.
+          const u = 1 - eased;
+          const cx = u * u * start.x + 2 * u * eased * midX + eased * eased * x;
+          const cy = u * u * start.y + 2 * u * eased * midY + eased * eased * y;
+          // The pointer's hot-spot is at top-left; offset so the visible
+          // tip lines up with (x, y).
+          cursor.style.transform = `translate(${cx - 4}px, ${cy - 4}px)`;
+          if (t < 1) requestAnimationFrame(step);
+          else {
+            cursorPos = { x, y };
+            resolve();
+          }
+        }
+        requestAnimationFrame(step);
+      });
+    }
+
+    function clickPulse() {
+      if (!cursor) return;
+      cursor.classList.remove('click');
+      // Force a reflow so the animation restarts.
+      void cursor.offsetWidth;
+      cursor.classList.add('click');
+    }
+
+    // actionPalette returns the colour scheme for visualising a given
+    // action: orange for click, blue for type/key, green for scroll, red
+    // for error fallback. Each tool category gets a glance-distinguishable
+    // ripple/highlight tint so a watching user can tell what just
+    // happened without reading the popup.
+    function actionPalette(action) {
+      switch (action) {
+        case 'type_text': case 'cdp_type': case 'cdp_key':
+          return { ring: '#58a6ff', fill: 'rgba(88, 166, 255, 0.55)',  glow: 'rgba(88, 166, 255, 0.55)' };
+        case 'scroll': case 'cdp_scroll':
+          return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.45)',   glow: 'rgba(63, 185, 80, 0.5)'   };
+        case 'navigate': case 'page_reload':
+          return { ring: '#a371f7', fill: 'rgba(163, 113, 247, 0.5)',  glow: 'rgba(163, 113, 247, 0.55)' };
+        case '__error':
+          return { ring: '#f85149', fill: 'rgba(248, 81, 73, 0.55)',   glow: 'rgba(248, 81, 73, 0.6)'   };
+        default: // click, cdp_click, anything unknown
+          return { ring: '#d29922', fill: 'rgba(210, 153, 34, 0.55)',  glow: 'rgba(210, 153, 34, 0.6)'  };
+      }
+    }
+
+    function flashAt(x, y, palette) {
+      ensure();
+      if (!root) return;
+      const p = palette || actionPalette('click');
+      // Stack a radial-gradient fill behind the stroked ring so the click
+      // reads as a real "tap landed here" beat rather than just a fading
+      // outline. Both elements are absolutely positioned at (x, y).
+      const fill = document.createElement('div');
+      fill.className = 'ripple-fill';
+      fill.style.left = x + 'px';
+      fill.style.top = y + 'px';
+      fill.style.setProperty('--ripple-fill', p.fill);
+      root.appendChild(fill);
+      setTimeout(() => fill.remove(), 480);
+
+      const ring = document.createElement('div');
+      ring.className = 'ripple';
+      ring.style.left = x + 'px';
+      ring.style.top = y + 'px';
+      ring.style.setProperty('--ripple-ring', p.ring);
+      root.appendChild(ring);
+      setTimeout(() => ring.remove(), 700);
+    }
+
+    function highlightRect(rect, palette) {
+      ensure();
+      if (!root || !rect) return;
+      const p = palette || actionPalette('click');
+      const h = document.createElement('div');
+      h.className = 'highlight';
+      h.style.left = (rect.left - 2) + 'px';
+      h.style.top = (rect.top - 2) + 'px';
+      h.style.width = (rect.width + 4) + 'px';
+      h.style.height = (rect.height + 4) + 'px';
+      h.style.setProperty('--highlight-color', p.ring);
+      h.style.setProperty('--highlight-glow', p.glow);
+      root.appendChild(h);
+      setTimeout(() => h.remove(), 1200);
+    }
+
+    // Loupe: a circular spotlight shown over each match in read-only
+    // scans like find_text. Communicates "the agent looked here" without
+    // pretending a click happened.
+    function loupeAt(x, y) {
+      ensure();
+      if (!root) return;
+      const l = document.createElement('div');
+      l.className = 'loupe';
+      l.style.left = x + 'px';
+      l.style.top = y + 'px';
+      root.appendChild(l);
+      setTimeout(() => l.remove(), 380);
+    }
+
+    // scanFlash: outline-pulse a list of element bboxes briefly. Used by
+    // get_interactive_map so the user sees the agent enumerated every
+    // interactive element on the page in a single perceptible beat.
+    function scanFlash(items) {
+      ensure();
+      if (!root || !items) return;
+      // Cap the simultaneous flashes so we don't spawn 500+ DOM nodes
+      // when the page has a huge interactive map.
+      const cap = Math.min(items.length, 80);
+      for (let i = 0; i < cap; i++) {
+        const el = items[i];
+        if (!el || !el.w || !el.h) continue;
+        const f = document.createElement('div');
+        f.className = 'scan-flash';
+        f.style.left = el.x + 'px';
+        f.style.top = el.y + 'px';
+        f.style.width = el.w + 'px';
+        f.style.height = el.h + 'px';
+        // Stagger by index so it sweeps left-to-right rather than firing
+        // every outline at the exact same frame — feels less like a flash
+        // bulb, more like a radar sweep.
+        f.style.animationDelay = Math.min(280, i * 6) + 'ms';
+        root.appendChild(f);
+        setTimeout(() => f.remove(), 1100);
+      }
+    }
+
+    // scanLoupe: animate the agent cursor across a sequence of result
+    // bboxes (find_text, extract_text), placing a loupe at each. Caller
+    // is responsible for capping the items list to avoid 30s scans.
+    async function scanLoupe(items) {
+      for (const it of items) {
+        if (!it || typeof it.x !== 'number') continue;
+        const cx = it.x + (it.w || 0) / 2;
+        const cy = it.y + (it.h || 0) / 2;
+        await moveCursorTo(cx, cy);
+        loupeAt(cx, cy);
+        // Short hold so the user can register what was looked at before
+        // the cursor leaves for the next match.
+        await new Promise((r) => setTimeout(r, 160));
+      }
+    }
+
+    function showToast(text, who) {
+      ensure();
+      if (!toastEl) return;
+      toastEl.innerHTML = (who ? `<span class="who">${escapeHtml(who)}</span>` : '') + escapeHtml(text);
+      toastEl.classList.add('on');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('on'), 2800);
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function resolveTarget(action, params) {
+      if (!params) return null;
+      if (action === 'click' || action === 'cdp_click') {
+        if (params.selector) {
+          const el = document.querySelector(params.selector);
+          if (el) {
+            const r = el.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r };
+          }
+        }
+        if (typeof params.x === 'number' && typeof params.y === 'number') {
+          return { x: params.x, y: params.y };
+        }
+      }
+      if (action === 'type_text' && params.selector) {
+        const el = document.querySelector(params.selector);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          return { x: r.left + Math.min(20, r.width / 4), y: r.top + r.height / 2, bbox: r, type: 'type' };
+        }
+      }
+      if (action === 'cdp_type' && typeof document.activeElement?.getBoundingClientRect === 'function') {
+        const r = document.activeElement.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          return { x: r.left + 14, y: r.top + r.height / 2, bbox: r, type: 'type' };
+        }
+      }
+      if (action === 'inspect' && params.selector) {
+        const el = document.querySelector(params.selector);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'inspect' };
+        }
+      }
+      return null;
+    }
+
+    async function showStart({ action, intent, clientLabel, clientType, params }) {
+      try {
+        const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
+        setBadge({ display, intent: intent || `${action}…` });
+        if (intent) showToast(intent, display);
+
+        const target = resolveTarget(action, params);
+        if (target) {
+          const palette = actionPalette(action);
+          await moveCursorTo(target.x, target.y);
+          if (target.type === 'type' || target.type === 'inspect') {
+            highlightRect(target.bbox, palette);
+          } else {
+            // Default = click-style flash + bbox highlight.
+            clickPulse();
+            flashAt(target.x, target.y, palette);
+            if (target.bbox) highlightRect(target.bbox, palette);
+          }
+        }
+      } catch (e) {
+        // Overlay is non-critical; never throw upstream.
+      } finally {
+        // Reset the idle-fade clock on every overlay activity. After
+        // IDLE_FADE_MS of nothing happening, the cursor + badge fade away
+        // so the page isn't permanently overlaid.
+        scheduleIdleFade();
+      }
+    }
+
+    // showResult visualises the result of read-only tools that didn't
+    // already place a cursor on the page during showStart: find_text and
+    // extract_text get a moving loupe sweep, get_interactive_map gets a
+    // scan-flash over every interactive element. Anything else is silent.
+    async function showResult({ action, result }) {
+      try {
+        if (!result) return;
+        if (action === 'find_text' && Array.isArray(result.results)) {
+          // Cap so a 50-match find doesn't take 10 seconds to play out.
+          await scanLoupe(result.results.slice(0, 6));
+        } else if (action === 'extract_text' && Array.isArray(result.blocks)) {
+          await scanLoupe(result.blocks.slice(0, 6));
+        } else if (action === 'get_interactive_map' && Array.isArray(result.elements)) {
+          scanFlash(result.elements);
+        } else if (action === 'turbo_snapshot' && result.interactiveMap?.elements) {
+          scanFlash(result.interactiveMap.elements);
+        }
+      } catch (e) {
+        // Visualisation is non-critical.
+      } finally {
+        scheduleIdleFade();
+      }
+    }
+
+    // showError flashes a red ripple at the current cursor position and
+    // shakes the cursor — a glance-readable "that just failed" cue
+    // without forcing the user to expand the popup activity row.
+    function showError({ action, error }) {
+      try {
+        ensure();
+        if (cursor) {
+          cursor.classList.add('on');
+          cursor.classList.add('error');
+          setTimeout(() => cursor && cursor.classList.remove('error'), 600);
+        }
+        flashAt(cursorPos.x, cursorPos.y, actionPalette('__error'));
+        const display = badge?.querySelector('.agent-name')?.textContent || 'agent';
+        showToast('✗ ' + (error || 'tool failed'), display);
+      } catch (e) {
+        // Visualisation is non-critical.
+      } finally {
+        scheduleIdleFade();
+      }
+    }
+
+    function scheduleIdleFade() {
+      if (idleFadeTimer) clearTimeout(idleFadeTimer);
+      idleFadeTimer = setTimeout(() => {
+        if (cursor) {
+          cursor.classList.remove('on');
+          // Park the cursor off-screen so its next reveal feels like an
+          // entrance rather than a teleport from its last spot.
+          cursor.style.transform = 'translate(-1000px, -1000px)';
+          cursorPos = { x: window.innerWidth / 2, y: -40 };
+        }
+        if (badge) badge.classList.remove('on');
+      }, IDLE_FADE_MS);
+    }
+
+    return { showStart, showResult, showError };
+  })();
+
   // --- Message router ---
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'ping') {
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.action === '__turbo_overlay') {
+      const payload = msg.payload || {};
+      if (payload.kind === 'start') {
+        // Resolve sendResponse only after the cursor has actually arrived
+        // at the target. The background waits on this for click/type
+        // actions so the visible click happens AT the cursor, not while
+        // the cursor is still in flight. showStart kicks off the ripple
+        // synchronously after arrival, so the ripple coincides with the
+        // real DOM click that follows.
+        overlay.showStart(payload).then(() => sendResponse({ ok: true }));
+        return true; // async response
+      }
+      if (payload.kind === 'result') {
+        // Visualise the result of read-only tools (loupe sweep / scan
+        // flash). Fire-and-forget; the response can be sync.
+        overlay.showResult(payload);
+        sendResponse({ ok: true });
+        return;
+      }
+      if (payload.kind === 'error') {
+        overlay.showError(payload);
+        sendResponse({ ok: true });
+        return;
+      }
       sendResponse({ ok: true });
       return;
     }

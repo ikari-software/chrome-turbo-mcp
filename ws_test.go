@@ -41,6 +41,14 @@ func connectMockBrowser(t *testing.T, wsURL string, handler func(msg map[string]
 			if json.Unmarshal(message, &msg) != nil {
 				continue
 			}
+			// Skip server-initiated push messages (e.g. mcp_clients) — those
+			// are notifications, not commands awaiting a response.
+			if _, isPush := msg["type"]; isPush {
+				continue
+			}
+			if _, hasID := msg["id"]; !hasID {
+				continue
+			}
 			resp := handler(msg)
 			resp["id"] = msg["id"]
 			respBytes, _ := json.Marshal(resp)

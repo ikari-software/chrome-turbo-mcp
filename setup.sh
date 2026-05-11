@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Chrome Turbo MCP — local install helper.
+# TurboWeb MCP by ikari — local install helper.
 # Builds the Go binary, generates browser launchers that load the extension,
 # and prints next steps for the chrome://extensions install.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-EXT_DIR="$DIR/extension"
+EXT_DIR="$DIR/extension/dist/chrome"
 
-echo "=== Chrome Turbo MCP Setup ==="
+echo "=== TurboWeb MCP by ikari — Setup ==="
 echo ""
 
 # --- Build the Go MCP server binary ---
@@ -16,9 +16,9 @@ if ! command -v go >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[1/2] Building chrome-turbo-mcp..."
+echo "[1/2] Building turboweb-mcp-by-ikari..."
 ( cd "$DIR" && make build >/dev/null )
-echo "      Built bin/chrome-turbo-mcp"
+echo "      Built bin/turboweb-mcp-by-ikari (with bin/chrome-turbo-mcp shim for back-compat)"
 
 # --- Generate browser launchers (load extension on next start) ---
 echo "[2/2] Generating browser launchers..."
@@ -54,5 +54,9 @@ echo "    3. Click 'Load unpacked'"
 echo "    4. Select: $EXT_DIR"
 echo ""
 echo "Run the server:"
-echo "  $DIR/bin/chrome-turbo-mcp"
+echo "  $DIR/bin/turboweb-mcp-by-ikari"
+echo ""
+echo "Back-compat: $DIR/bin/chrome-turbo-mcp is a shim that execs the renamed"
+echo "binary, so any existing ~/.claude.json pointing at the old path keeps"
+echo "working without edits."
 echo ""

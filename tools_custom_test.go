@@ -237,7 +237,7 @@ func TestJoin(t *testing.T) {
 func TestGetConfigDir_XDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/test-xdg")
 	got := getConfigDir()
-	want := filepath.Join("/tmp/test-xdg", "chrome-turbo-mcp")
+	want := filepath.Join("/tmp/test-xdg", "turboweb-mcp-by-ikari")
 	if got != want {
 		t.Errorf("getConfigDir() = %q, want %q", got, want)
 	}
@@ -248,7 +248,7 @@ func TestGetConfigDir_Default(t *testing.T) {
 	t.Setenv("APPDATA", "")
 	got := getConfigDir()
 	home, _ := os.UserHomeDir()
-	want := filepath.Join(home, ".config", "chrome-turbo-mcp")
+	want := filepath.Join(home, ".config", "turboweb-mcp-by-ikari")
 	if got != want {
 		t.Errorf("getConfigDir() = %q, want %q", got, want)
 	}

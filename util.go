@@ -90,13 +90,50 @@ func getBool(args map[string]any, key string, defaultVal bool) bool {
 	return defaultVal
 }
 
-// getArgs extracts the arguments map from a CallToolRequest.
-// mcp-go stores params in request.Params.Arguments.
+// maxIntentLen caps the agent-supplied narration to a single line of
+// reasonable length. The model is asked for one short sentence; clamping
+// server-side prevents a misbehaving (or prompt-injected) agent from
+// drowning the popup/toast in a 5KB intent.
+const maxIntentLen = 200
+
+// rawArgs returns the arguments map suitable for forwarding to the extension
+// via the WS bridge. As a side-effect it pulls out the agent-supplied `intent`
+// field, clamps it to maxIntentLen, and rewrites it as `_intent` so the
+// extension popup and on-page overlay can surface it to the human user.
+// The original `intent` key is removed so handlers never see it.
 func rawArgs(args map[string]any) map[string]any {
 	if args == nil {
 		return map[string]any{}
 	}
-	return args
+	intent, hasIntent := args["intent"].(string)
+	if !hasIntent || intent == "" {
+		return args
+	}
+	if len(intent) > maxIntentLen {
+		intent = intent[:maxIntentLen] + "…"
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		if k == "intent" {
+			continue
+		}
+		out[k] = v
+	}
+	out["_intent"] = intent
+	return out
+}
+
+// extractIntent reads the agent's `intent` argument without mutating the map.
+// Useful from handlers that don't pipe args through rawArgs (e.g. BiDi-only
+// handlers that need to log via a side channel).
+func extractIntent(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	if s, ok := args["intent"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // buildParams creates a params map for the WebSocket send, filtering nil values.

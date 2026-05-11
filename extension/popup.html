@@ -4,8 +4,8 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    width: 340px;
-    min-height: 300px;
+    width: 460px;
+    min-height: 480px;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
     font-size: 11px;
     background: #0d1117;
@@ -13,6 +13,17 @@
     padding: 12px;
     overflow-x: hidden;
   }
+  /* When loaded as a popped-out chrome.windows.create window, fill the
+     whole window and make the activity log expand with available height. */
+  body.windowed {
+    width: 100vw;
+    min-height: 100vh;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  body.windowed .section.log-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  body.windowed .log { flex: 1; min-height: 0; max-height: none; }
   .header {
     display: flex;
     align-items: center;
@@ -39,19 +50,65 @@
   .dot.on { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
   .dot.on.pulse { animation: pulse 2s infinite; }
   @keyframes pulse { 0%, 100% { box-shadow: 0 0 4px #3fb95044; } 50% { box-shadow: 0 0 10px #3fb950aa; } }
-  .status-text { flex: 1; }
+  .status-text { flex: 1; min-width: 0; }
   .status-text .label { color: #8b949e; font-size: 10px; }
-  .browsers-list { color: #58a6ff; font-size: 10px; }
+  .browsers-list { color: #58a6ff; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .section { margin-bottom: 10px; }
   .section-head {
     font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px;
     color: #484f58; margin-bottom: 4px; padding: 0 2px;
-    display: flex; justify-content: space-between;
+    display: flex; justify-content: space-between; align-items: center;
   }
 
+  .clients {
+    background: #010409;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    padding: 4px 0;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .client {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 8px;
+    border-bottom: 1px solid #0d1117;
+  }
+  .client:last-child { border-bottom: none; }
+  .client .agent-icon { width: 14px; height: 14px; flex-shrink: 0; }
+  .client .agent-name { flex: 1; color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .client .agent-meta { color: #484f58; font-size: 9px; }
+  .client .agent-tag {
+    background: #21262d; color: #8b949e;
+    padding: 1px 5px; border-radius: 8px;
+    font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .client .agent-tag.claude-code, .client .agent-tag.claude { background: #4f3a17; color: #d29922; }
+  .client .agent-tag.cursor { background: #1f3a4f; color: #58a6ff; }
+  .client .agent-tag.vscode { background: #1f3a4f; color: #58a6ff; }
+  .clients-empty { color: #484f58; padding: 8px; text-align: center; font-style: italic; }
+
+  .filter-bar {
+    display: flex; gap: 4px; margin-bottom: 4px;
+  }
+  .filter-bar input {
+    flex: 1;
+    background: #161b22; color: #c9d1d9;
+    border: 1px solid #21262d; border-radius: 4px;
+    padding: 4px 6px; font-family: inherit; font-size: 10px;
+    outline: none;
+  }
+  .filter-bar input:focus { border-color: #58a6ff; }
+  .filter-bar button {
+    background: #161b22; color: #8b949e;
+    border: 1px solid #21262d; border-radius: 4px;
+    padding: 4px 8px; font-size: 10px; cursor: pointer;
+    font-family: inherit;
+  }
+  .filter-bar button:hover { background: #21262d; color: #c9d1d9; }
+
   .log {
-    max-height: 220px;
+    max-height: 480px;
     overflow-y: auto;
     background: #010409;
     border: 1px solid #21262d;
@@ -62,18 +119,23 @@
   .log::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
 
   .entry {
+    border-bottom: 1px solid #0d1117;
+    transition: background 0.15s;
+    cursor: pointer;
+  }
+  .entry:hover { background: #161b22; }
+  .entry.running { background: #161b2288; }
+  .entry-row {
     display: flex;
     align-items: center;
     padding: 3px 8px;
     gap: 6px;
-    border-bottom: 1px solid #0d1117;
-    transition: background 0.15s;
   }
-  .entry:hover { background: #161b22; }
-  .entry.running { background: #161b2288; }
   .entry .time { color: #484f58; width: 55px; flex-shrink: 0; }
-  .entry .action { color: #58a6ff; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry .action { color: #58a6ff; font-weight: 500; flex-shrink: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry .action.err { color: #f85149; }
+  .entry .intent { color: #c9d1d9; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+  .entry .intent.muted { color: #6e7681; font-style: normal; }
   .entry .dur { color: #8b949e; text-align: right; width: 50px; flex-shrink: 0; }
   .entry .dur.fast { color: #3fb950; }
   .entry .dur.slow { color: #d29922; }
@@ -82,8 +144,37 @@
     width: 10px; height: 10px; border: 1.5px solid #58a6ff;
     border-top-color: transparent; border-radius: 50%;
     animation: spin 0.6s linear infinite;
+    flex-shrink: 0;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .entry .client-chip {
+    background: #21262d; color: #8b949e;
+    padding: 1px 4px; border-radius: 6px;
+    font-size: 8px; flex-shrink: 0;
+    max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .entry-detail {
+    padding: 4px 8px 8px 70px;
+    color: #8b949e; font-size: 10px;
+    background: #0d1117;
+    border-top: 1px dashed #21262d;
+    display: none;
+    word-break: break-all;
+  }
+  .entry.expanded .entry-detail { display: block; }
+  .entry-detail .row { margin-bottom: 4px; }
+  .entry-detail .key { color: #6e7681; text-transform: uppercase; font-size: 8px; letter-spacing: 1px; }
+  .entry-detail pre {
+    background: #010409;
+    border: 1px solid #21262d;
+    border-radius: 3px;
+    padding: 4px 6px;
+    margin-top: 2px;
+    color: #c9d1d9; font-size: 10px;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 120px; overflow-y: auto;
+  }
 
   .stats-row {
     display: flex;
@@ -107,8 +198,13 @@
 <body>
   <div class="header">
     <span class="bolt">&#x26A1;</span>
-    <h1>CHROME TURBO</h1>
-    <span class="ver">MCP v1.0</span>
+    <h1>TURBOWEB</h1>
+    <span class="ver">MCP v1.1</span>
+    <button id="popout"
+            title="Open in resizable window"
+            style="margin-left:6px;background:#161b22;color:#8b949e;border:1px solid #21262d;border-radius:4px;padding:3px 8px;font:10px/1 inherit;cursor:pointer;">
+      ⤢ Pop out
+    </button>
   </div>
 
   <div class="status-bar">
@@ -121,8 +217,22 @@
 
   <div class="section">
     <div class="section-head">
+      <span>Connected agents</span>
+      <span id="clients-count">0</span>
+    </div>
+    <div class="clients" id="clients">
+      <div class="clients-empty" id="clients-empty">No agents connected</div>
+    </div>
+  </div>
+
+  <div class="section log-section">
+    <div class="section-head">
       <span>Activity</span>
       <span id="cmd-rate"></span>
+    </div>
+    <div class="filter-bar">
+      <input id="filter" type="text" placeholder="Filter by action, intent, client…" />
+      <button id="clear-log" title="Clear activity">Clear</button>
     </div>
     <div class="log" id="log">
       <div class="empty" id="empty-msg">Waiting for commands...</div>

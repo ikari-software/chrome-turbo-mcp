@@ -9,7 +9,7 @@ import (
 
 func registerInteractionTools(s *server.MCPServer) {
 	// --- click ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("click",
 			mcp.WithDescription("Click an element by CSS selector OR x,y coordinates. Dispatches mousedown, mouseup, click events."),
 			mcp.WithString("selector", mcp.Description("CSS selector of element to click")),
@@ -21,7 +21,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- type_text ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("type_text",
 			mcp.WithDescription("Type text into an element. Uses insertText command so it works with React, Vue, and other frameworks. Can clear existing text first."),
 			mcp.WithString("text", mcp.Required(), mcp.Description("Text to type")),
@@ -34,7 +34,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- scroll ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("scroll",
 			mcp.WithDescription("Scroll the page or a specific element. Use direction (up/down/left/right) or pixel offsets."),
 			mcp.WithString("direction", mcp.Description("Scroll direction")),
@@ -48,7 +48,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- cdp_click (now via BiDi input.performActions) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("cdp_click",
 			mcp.WithDescription("Click at exact viewport coordinates using real browser input. Works on MUI portals, dropdowns, and any element. Use when regular click tool fails on overlay/popup elements."),
 			mcp.WithNumber("x", mcp.Required(), mcp.Description("X viewport coordinate")),
@@ -60,7 +60,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- cdp_type (now via BiDi input.performActions) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("cdp_type",
 			mcp.WithDescription("Type text using real keyboard events. Works with React, MUI, and any framework. Use clear=true to select-all and delete before typing."),
 			mcp.WithString("text", mcp.Required(), mcp.Description("Text to type character by character")),
@@ -71,7 +71,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- cdp_key (now via BiDi input.performActions) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("cdp_key",
 			mcp.WithDescription("Press a single key via real browser input. Supports: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab."),
 			mcp.WithString("key", mcp.Required(), mcp.Description("Key name: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab")),
@@ -81,7 +81,7 @@ func registerInteractionTools(s *server.MCPServer) {
 	)
 
 	// --- cdp_scroll (now via BiDi input.performActions) ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("cdp_scroll",
 			mcp.WithDescription("Scroll at a specific viewport position using real browser wheel events. Provide x,y for position, deltaY for amount (negative=up, positive=down)."),
 			mcp.WithNumber("x", mcp.Description("X coordinate for scroll position (default 600)")),

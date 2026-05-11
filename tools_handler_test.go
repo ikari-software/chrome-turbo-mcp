@@ -624,6 +624,10 @@ func TestHandleRunTool_WithSystemPrompt(t *testing.T) {
 	cleanup := setupTestDB(t)
 	defer cleanup()
 
+	// Force haiku-only backend so we exercise the legacy "Haiku
+	// unavailable" fallback path; otherwise auto would try local AI
+	// via the mock browser and produce a different banner.
+	t.Setenv("TURBOWEB_AI_BACKEND", "haiku")
 	origHaiku := haiku
 	haiku = nil // Haiku nil → returns "[Haiku unavailable]"
 	defer func() { haiku = origHaiku }()

@@ -1,4 +1,4 @@
-module chrome-turbo-mcp
+module turboweb-mcp-by-ikari
 
 go 1.26.2
 

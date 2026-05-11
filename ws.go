@@ -67,9 +67,23 @@ var (
 	useRelay  bool       // set once at startup, not changed after
 
 	// relayClients tracks connected MCP relay clients (daemon only).
-	relayClients   = make(map[*websocket.Conn]struct{})
+	// Each entry carries the client's self-reported label/sessionType so the
+	// daemon can attribute commands to a specific agent and surface them in
+	// the extension popup.
+	relayClients   = make(map[*websocket.Conn]*relayClientInfo)
 	relayClientsMu sync.Mutex
 )
+
+// relayClientInfo tracks metadata for a connected MCP relay client.
+type relayClientInfo struct {
+	conn        *websocket.Conn
+	label       string
+	sessionType string
+	client      string // raw initialize clientInfo.name
+	version     string // raw initialize clientInfo.version
+	pid         int
+	connectedAt time.Time
+}
 
 // --- Daemon mode: runs the WS server as a standalone singleton ---
 
@@ -98,11 +112,13 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	info := &relayClientInfo{conn: conn, connectedAt: time.Now()}
 	relayClientsMu.Lock()
-	relayClients[conn] = struct{}{}
+	relayClients[conn] = info
 	count := len(relayClients)
 	relayClientsMu.Unlock()
 	logger.Printf("MCP relay client connected (%d client(s))", count)
+	broadcastClientsToBrowsers()
 
 	defer func() {
 		relayClientsMu.Lock()
@@ -111,6 +127,7 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		relayClientsMu.Unlock()
 		conn.Close()
 		logger.Printf("MCP relay client disconnected (%d client(s) remaining)", remaining)
+		broadcastClientsToBrowsers()
 	}()
 
 	// Use a mutex for this specific conn's writes since multiple goroutines respond.
@@ -122,6 +139,28 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Try control message first (register).
+		var ctrl struct {
+			Type        string `json:"type"`
+			Label       string `json:"label"`
+			SessionType string `json:"sessionType"`
+			Client      string `json:"client"`
+			Version     string `json:"version"`
+			PID         int    `json:"pid"`
+		}
+		if json.Unmarshal(message, &ctrl) == nil && ctrl.Type == "register" {
+			relayClientsMu.Lock()
+			info.label = ctrl.Label
+			info.sessionType = ctrl.SessionType
+			info.client = ctrl.Client
+			info.version = ctrl.Version
+			info.pid = ctrl.PID
+			relayClientsMu.Unlock()
+			logger.Printf("Relay client registered: label=%s type=%s pid=%d", ctrl.Label, ctrl.SessionType, ctrl.PID)
+			broadcastClientsToBrowsers()
+			continue
+		}
+
 		var req struct {
 			ID      string         `json:"id"`
 			Action  string         `json:"action"`
@@ -131,6 +170,19 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(message, &req) != nil || req.ID == "" {
 			continue
 		}
+
+		// Attach client metadata so the extension can attribute the command.
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		relayClientsMu.Lock()
+		if info.label != "" {
+			req.Params["_clientLabel"] = info.label
+		}
+		if info.sessionType != "" {
+			req.Params["_clientType"] = info.sessionType
+		}
+		relayClientsMu.Unlock()
 
 		go func(reqID, action string, params map[string]any, timeout int) {
 			result, err := sendDirect(action, params, timeout)
@@ -144,6 +196,54 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			conn.WriteMessage(websocket.TextMessage, resp)
 			writeMu.Unlock()
 		}(req.ID, req.Action, req.Params, req.Timeout)
+	}
+}
+
+// broadcastClientsToBrowsers sends the current set of MCP clients to every
+// connected browser extension as an unsolicited push. The extension surfaces
+// this in the popup so the user can see which agents are talking to them.
+func broadcastClientsToBrowsers() {
+	clients := []map[string]any{}
+
+	relayClientsMu.Lock()
+	for _, c := range relayClients {
+		entry := map[string]any{
+			"label":       c.label,
+			"sessionType": c.sessionType,
+			"client":      c.client,
+			"version":     c.version,
+			"connectedAt": c.connectedAt.UnixMilli(),
+		}
+		if c.pid != 0 {
+			entry["pid"] = c.pid
+		}
+		if c.label == "" {
+			entry["label"] = fmt.Sprintf("anon#%p", c.conn)
+		}
+		clients = append(clients, entry)
+	}
+	relayClientsMu.Unlock()
+
+	// In-process MCP mode: this process is itself the only client. The
+	// MCP-side calls broadcastClientsToBrowsers() too, so include our own
+	// session metadata for browsers.
+	if len(clients) == 0 && getSessionLabel() != "" {
+		clients = append(clients, snapshotSession())
+	}
+
+	msg, _ := json.Marshal(map[string]any{"type": "mcp_clients", "clients": clients})
+
+	browsersMu.RLock()
+	conns := make([]*BrowserConnection, 0, len(browsers))
+	for _, bc := range browsers {
+		conns = append(conns, bc)
+	}
+	browsersMu.RUnlock()
+
+	for _, bc := range conns {
+		bc.mu.Lock()
+		_ = bc.conn.WriteMessage(websocket.TextMessage, msg)
+		bc.mu.Unlock()
 	}
 }
 
@@ -203,6 +303,20 @@ func connectRelay() {
 		relayConn = conn
 		relayMu.Unlock()
 		logger.Printf("Connected to daemon as relay client")
+
+		// Identify ourselves to the daemon so it can attribute our commands.
+		sess := snapshotSession()
+		reg, _ := json.Marshal(map[string]any{
+			"type":        "register",
+			"label":       sess["label"],
+			"sessionType": sess["sessionType"],
+			"client":      sess["client"],
+			"version":     sess["version"],
+			"pid":         sess["pid"],
+		})
+		relayMu.Lock()
+		_ = conn.WriteMessage(websocket.TextMessage, reg)
+		relayMu.Unlock()
 
 		for {
 			_, message, err := conn.ReadMessage()
@@ -264,6 +378,9 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 	count := len(browsers)
 	browsersMu.Unlock()
 	logger.Printf("Extension connected (%d browser(s) total)", count)
+	// Push the current MCP client list right away so the popup is populated
+	// without waiting for a registration to happen.
+	go broadcastClientsToBrowsers()
 
 	defer func() {
 		browsersMu.Lock()
@@ -426,6 +543,17 @@ func send(action string, params map[string]any, timeoutMs ...int) (json.RawMessa
 
 // sendDirect routes a command directly to browsers (daemon mode or in-process fallback).
 func sendDirect(action string, params map[string]any, timeout int) (json.RawMessage, error) {
+	// Ensure every outgoing command carries client-attribution metadata so the
+	// extension popup can attribute it. The relay handler may have already
+	// attached _clientLabel; only fill it from our session if absent.
+	if params == nil {
+		params = map[string]any{}
+	}
+	if _, ok := params["_clientLabel"]; !ok {
+		if lbl := getSessionLabel(); lbl != "" {
+			params["_clientLabel"] = lbl
+		}
+	}
 	open := getOpenBrowsers()
 	if len(open) == 0 {
 		// Try auto-launching a browser

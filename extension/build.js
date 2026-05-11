@@ -2,6 +2,8 @@
 // Build script: produces dist/chrome/ and dist/firefox/ from the single source extension.
 // Chrome: uses service_worker for background
 // Firefox: uses scripts array for background (event page)
+//
+// Pass --watch to rebuild on every change to a source file.
 
 const fs = require('fs');
 const path = require('path');
@@ -9,6 +11,7 @@ const path = require('path');
 const SRC = __dirname;
 const DIST = path.join(SRC, 'dist');
 const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js'];
+const WATCHED = [...SHARED, 'manifest.json'];
 
 function build() {
   const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
@@ -34,18 +37,57 @@ function build() {
       // Add gecko settings
       m.browser_specific_settings = {
         gecko: {
-          id: 'turbo-mcp@turbo.local',
+          id: 'turboweb-mcp@ikari.local',
           strict_min_version: '128.0',
         },
       };
-      // Rename (drop "Chrome" prefix)
-      m.name = 'Turbo MCP';
-      m.action.default_title = 'Turbo MCP';
+      // Display name in Firefox — same as Chrome's, kept consistent
+      // since the extension is browser-agnostic.
+      m.name = 'TurboWeb MCP by ikari';
+      m.action.default_title = 'TurboWeb MCP by ikari';
     }
 
     fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(m, null, 2) + '\n');
-    console.log(`${target}: ${out}`);
   }
 }
 
-build();
+function buildLogged() {
+  const t0 = Date.now();
+  try {
+    build();
+    const ms = Date.now() - t0;
+    console.log(`[${new Date().toLocaleTimeString('en-GB', { hour12: false })}] built dist/{chrome,firefox} in ${ms}ms`);
+  } catch (e) {
+    console.error(`[build] failed: ${e.message}`);
+  }
+}
+
+// Watch mode: rebuild on any change to a source file. Uses fs.watch (which is
+// edge-triggered and noisy on macOS), so we debounce to a single rebuild per
+// 150ms burst.
+function watch() {
+  buildLogged();
+  console.log('[watch] watching extension/ for changes…');
+
+  let timer = null;
+  const triggerRebuild = (filename) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      console.log(`[watch] change: ${filename}`);
+      buildLogged();
+    }, 150);
+  };
+
+  fs.watch(SRC, { persistent: true }, (_event, filename) => {
+    if (!filename) return;
+    if (!WATCHED.includes(filename)) return;
+    triggerRebuild(filename);
+  });
+}
+
+if (process.argv.includes('--watch')) {
+  watch();
+} else {
+  buildLogged();
+}

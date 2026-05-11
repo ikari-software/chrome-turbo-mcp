@@ -145,29 +145,71 @@ func (h *HaikuClient) ask(question, context, imageBase64, systemPrompt string) (
 	return strings.Join(texts, "\n"), nil
 }
 
-// maybeAsk returns raw data if no question is provided, or pipes through Haiku.
+// maybeAsk returns raw data if no question is provided, or pipes through
+// the configured AI backend (Haiku, Chrome's built-in Gemini Nano, or
+// auto-fallback). See aiBackend() for the routing policy.
 func maybeAsk(rawData json.RawMessage, question, imageBase64 string) (*mcp.CallToolResult, error) {
 	if question == "" {
 		return mcp.NewToolResultText(string(rawData)), nil
 	}
-	if haiku == nil {
-		return mcp.NewToolResultText("[Haiku unavailable — raw data follows]\n" + string(rawData)), nil
-	}
-	answer, err := haiku.ask(question, string(rawData), imageBase64, "")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Haiku error: %v", err)), nil
-	}
-	return mcp.NewToolResultText(answer), nil
+	return askViaBackend(rawData, question, "", imageBase64)
 }
 
-// maybeAskWithSystem always processes through Haiku with a custom system prompt.
+// maybeAskWithSystem always tries to post-process via the configured
+// backend, with a custom system prompt. Used by custom tools that bake
+// in their own instructions for the post-processor.
 func maybeAskWithSystem(rawData json.RawMessage, question, systemPrompt, imageBase64 string) (*mcp.CallToolResult, error) {
-	if haiku == nil {
-		return mcp.NewToolResultText("[Haiku unavailable — raw data follows]\n" + string(rawData)), nil
+	return askViaBackend(rawData, question, systemPrompt, imageBase64)
+}
+
+// askViaBackend is the single routing point for AI post-processing. It
+// honours TURBOWEB_AI_BACKEND, falls back gracefully when a backend
+// isn't usable, and never lets a backend failure bubble up as a tool
+// error — the worst case is "raw data follows" so the agent always gets
+// something useful back.
+//
+// Notes on screenshots: only the Anthropic API path is multimodal today.
+// When falling back to Gemini Nano, the image is dropped silently — local
+// AI still answers the question from the text context.
+func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 string) (*mcp.CallToolResult, error) {
+	switch aiBackend() {
+	case "none":
+		return mcp.NewToolResultText(string(rawData)), nil
+
+	case "haiku":
+		if haiku == nil {
+			return mcp.NewToolResultText("[Haiku unavailable (no ANTHROPIC_API_KEY) — raw data follows]\n" + string(rawData)), nil
+		}
+		answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Haiku error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(answer), nil
+
+	case "local":
+		return askLocalOrRaw(rawData, question, systemPrompt)
+
+	default: // "auto"
+		// Prefer Haiku when configured — better quality, multimodal.
+		if haiku != nil {
+			answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
+			if err == nil {
+				return mcp.NewToolResultText(answer), nil
+			}
+			logger.Printf("Haiku error, falling back to local Gemini Nano: %v", err)
+		}
+		return askLocalOrRaw(rawData, question, systemPrompt)
 	}
-	answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Haiku error: %v", err)), nil
+}
+
+// askLocalOrRaw asks Chrome's built-in Gemini Nano via the extension. On
+// any failure (no browser connected, model not downloaded, API absent)
+// it returns the raw data with an explanatory prefix rather than erroring
+// the whole tool call.
+func askLocalOrRaw(rawData json.RawMessage, question, systemPrompt string) (*mcp.CallToolResult, error) {
+	answer, err := localAsk(question, string(rawData), systemPrompt)
+	if err == nil {
+		return mcp.NewToolResultText(answer), nil
 	}
-	return mcp.NewToolResultText(answer), nil
+	return mcp.NewToolResultText("[AI unavailable (" + err.Error() + ") — raw data follows]\n" + string(rawData)), nil
 }

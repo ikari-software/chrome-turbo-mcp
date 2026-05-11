@@ -17,20 +17,51 @@ import (
 
 var db *sql.DB
 
+// configDirName is the per-user config folder for turboweb-mcp-by-ikari.
+// legacyConfigDirName is the pre-rebrand folder, kept so existing users
+// don't lose their saved custom tools when they upgrade.
+const (
+	configDirName       = "turboweb-mcp-by-ikari"
+	legacyConfigDirName = "chrome-turbo-mcp"
+	dbFileName          = "turboweb.db"
+	legacyDBFileName    = "chrome-turbo.db"
+)
+
+// getConfigDir returns the directory holding turboweb's per-user state.
+// Honours XDG_CONFIG_HOME (Linux), APPDATA (Windows), or ~/.config (mac
+// and Linux fallback).
 func getConfigDir() string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "chrome-turbo-mcp")
+		return filepath.Join(dir, configDirName)
 	}
 	if runtime.GOOS == "windows" {
 		if dir := os.Getenv("APPDATA"); dir != "" {
-			return filepath.Join(dir, "chrome-turbo-mcp")
+			return filepath.Join(dir, configDirName)
 		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".chrome-turbo-mcp")
+		return filepath.Join(".", "."+configDirName)
 	}
-	return filepath.Join(home, ".config", "chrome-turbo-mcp")
+	return filepath.Join(home, ".config", configDirName)
+}
+
+// getLegacyConfigDir returns the pre-rebrand config directory under the
+// same parent — used only by initDB to copy state forward on first run.
+func getLegacyConfigDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, legacyConfigDirName)
+	}
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("APPDATA"); dir != "" {
+			return filepath.Join(dir, legacyConfigDirName)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", "."+legacyConfigDirName)
+	}
+	return filepath.Join(home, ".config", legacyConfigDirName)
 }
 
 func initDB() error {
@@ -38,7 +69,19 @@ func initDB() error {
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	dbPath := filepath.Join(configDir, "chrome-turbo.db")
+	dbPath := filepath.Join(configDir, dbFileName)
+
+	// One-shot migration: if the new dir doesn't have a DB yet but the
+	// pre-rebrand dir does, copy it forward. Non-destructive — the old
+	// file stays put so users can roll back if anything goes sideways.
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		legacyDB := filepath.Join(getLegacyConfigDir(), legacyDBFileName)
+		if data, rerr := os.ReadFile(legacyDB); rerr == nil {
+			if werr := os.WriteFile(dbPath, data, 0644); werr == nil {
+				logger.Printf("Migrated DB forward: %s -> %s", legacyDB, dbPath)
+			}
+		}
+	}
 
 	var err error
 	db, err = sql.Open("sqlite", dbPath)
@@ -192,7 +235,7 @@ func toolCount() int {
 
 func registerCustomTools(s *server.MCPServer) {
 	// --- create_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("create_tool",
 			mcp.WithDescription("Create a reusable custom tool. The tool is saved to disk and persists across sessions. The code runs in the page context with access to a `params` object. Use `run_tool` to execute it later."),
 			mcp.WithString("name", mcp.Required(), mcp.Description(`Tool name (lowercase, no spaces — e.g. "get_field_info")`)),
@@ -216,7 +259,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- run_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("run_tool",
 			mcp.WithDescription("Run a previously created custom tool by name. Pass arguments as a JSON object."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Name of the custom tool to run")),
@@ -228,7 +271,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- list_custom_tools ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("list_custom_tools",
 			mcp.WithDescription("List all saved custom tools with their descriptions and parameters."),
 		),
@@ -236,7 +279,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- delete_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("delete_tool",
 			mcp.WithDescription("Delete a custom tool by name."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Name of the custom tool to delete")),
