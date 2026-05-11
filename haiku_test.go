@@ -214,6 +214,9 @@ func TestMaybeAsk_NoQuestion(t *testing.T) {
 }
 
 func TestMaybeAsk_NoHaiku(t *testing.T) {
+	// Force the haiku-only backend so the test asserts the legacy
+	// behaviour (no auto-fallback to Chrome's Gemini Nano).
+	t.Setenv("TURBOWEB_AI_BACKEND", "haiku")
 	origHaiku := haiku
 	haiku = nil
 	defer func() { haiku = origHaiku }()
@@ -233,6 +236,7 @@ func TestMaybeAsk_NoHaiku(t *testing.T) {
 }
 
 func TestMaybeAskWithSystem_NoHaiku(t *testing.T) {
+	t.Setenv("TURBOWEB_AI_BACKEND", "haiku")
 	origHaiku := haiku
 	haiku = nil
 	defer func() { haiku = origHaiku }()
@@ -245,6 +249,44 @@ func TestMaybeAskWithSystem_NoHaiku(t *testing.T) {
 	text := extractText(t, result)
 	if !strings.Contains(text, "Haiku unavailable") {
 		t.Errorf("expected Haiku unavailable, got %q", text)
+	}
+}
+
+// In auto mode (default), missing Haiku falls back to Chrome's built-in
+// Gemini Nano via the extension. With no extension connected the
+// fallback also fails, so the response carries an "AI unavailable"
+// banner plus the raw data.
+func TestMaybeAsk_NoBackendAutoFallback(t *testing.T) {
+	t.Setenv("TURBOWEB_AI_BACKEND", "auto")
+	origHaiku := haiku
+	haiku = nil
+	defer func() { haiku = origHaiku }()
+
+	raw := json.RawMessage(`{"data":"x"}`)
+	result, err := maybeAsk(raw, "what?", "")
+	if err != nil {
+		t.Fatalf("maybeAsk error: %v", err)
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "AI unavailable") {
+		t.Errorf("expected AI unavailable banner, got %q", text)
+	}
+	if !strings.Contains(text, `{"data":"x"}`) {
+		t.Errorf("should include raw data, got %q", text)
+	}
+}
+
+// TURBOWEB_AI_BACKEND=none short-circuits and always returns raw data.
+func TestMaybeAsk_NoneBackend(t *testing.T) {
+	t.Setenv("TURBOWEB_AI_BACKEND", "none")
+	raw := json.RawMessage(`{"k":1}`)
+	result, err := maybeAsk(raw, "ignored", "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	text := extractText(t, result)
+	if text != `{"k":1}` {
+		t.Errorf("none backend should return raw data verbatim, got %q", text)
 	}
 }
 

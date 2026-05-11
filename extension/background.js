@@ -685,8 +685,62 @@ async function dispatch(action, params) {
     case 'inject_script':
       return await toContent(params.tabId, 'inject_script', { code: params.code });
 
+    // --- Chrome's built-in Gemini Nano (Prompt API / Built-in AI) ---
+    // Used by the Go server's local-AI fallback so users without an
+    // ANTHROPIC_API_KEY still get question-answering on tool results.
+    case '__ask_local':
+      return await askLocal(params);
+
     default:
       throw new Error('Unknown action: ' + action);
+  }
+}
+
+// askLocal invokes Chrome's Built-in AI Prompt API (self.LanguageModel)
+// to answer a question grounded in the supplied context. Available in
+// Chrome 138+ when the model is downloaded; throws a sentinel
+// LOCAL_AI_* error otherwise so the Go side can fall through to raw data.
+async function askLocal({ question, context: ctx, systemPrompt } = {}) {
+  const LM = (typeof self !== 'undefined' && self.LanguageModel) || globalThis.LanguageModel;
+  if (!LM) {
+    throw new Error('LOCAL_AI_UNAVAILABLE: LanguageModel API not present (Chrome 138+ required; enable in chrome://flags#prompt-api-for-gemini-nano)');
+  }
+
+  let availability;
+  try {
+    availability = await LM.availability();
+  } catch (e) {
+    throw new Error('LOCAL_AI_PROBE_FAILED: ' + (e?.message || String(e)));
+  }
+  if (availability !== 'available') {
+    throw new Error('LOCAL_AI_NOT_READY: status=' + availability + ' (check chrome://components for Optimization Guide On Device Model)');
+  }
+
+  // Trim context to a safe window (~4k tokens ≈ 12k chars). Gemini Nano
+  // truncates silently otherwise; we'd rather be explicit.
+  let trimmedCtx = ctx || '';
+  if (trimmedCtx.length > 12000) {
+    trimmedCtx = trimmedCtx.slice(0, 12000) + '\n…(context truncated to fit local model window)';
+  }
+
+  const opts = systemPrompt
+    ? { initialPrompts: [{ role: 'system', content: systemPrompt }] }
+    : {};
+  let session;
+  try {
+    session = await LM.create(opts);
+  } catch (e) {
+    throw new Error('LOCAL_AI_CREATE_FAILED: ' + (e?.message || String(e)));
+  }
+
+  try {
+    const prompt = trimmedCtx
+      ? 'Context data:\n' + trimmedCtx + '\n\nQuestion: ' + question + '\n\nAnswer concisely.'
+      : question;
+    const answer = await session.prompt(prompt);
+    return { answer, backend: 'gemini-nano' };
+  } finally {
+    try { if (typeof session.destroy === 'function') session.destroy(); } catch {}
   }
 }
 
