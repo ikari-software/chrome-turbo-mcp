@@ -12,7 +12,7 @@ import (
 
 func registerDomTools(s *server.MCPServer) {
 	// --- extract_text ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("extract_text",
 			mcp.WithDescription("Fast DOM-based OCR: extract ALL visible text on the page with spatial positions (x, y, width, height). Instant — no image processing needed. Supports scoping by CSS selector or viewport region. Add `question` to get a concise Haiku-processed answer instead of raw data."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -33,7 +33,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- find_text ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("find_text",
 			mcp.WithDescription("Search for visible text on the page (like Cmd+F). Returns matching elements with positions, text content, and CSS selectors. Add `question` for Haiku-processed answer."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Text to search for")),
@@ -46,7 +46,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- inspect ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("inspect",
 			mcp.WithDescription("Deep one-shot inspection of an element. Find by CSS selector, coordinates, or text search. Returns element details, attributes, styles, parent chain, children, siblings. Add `question` for a concise Haiku-processed answer."),
 			mcp.WithString("selector", mcp.Description("CSS selector")),
@@ -61,7 +61,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- describe ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("describe",
 			mcp.WithDescription("The ultimate one-call page understanding tool. Takes a screenshot, gathers spatial/text data, and sends everything to Haiku with your question. Returns a concise answer."),
 			mcp.WithString("question", mcp.Required(), mcp.Description("What do you want to know about the page?")),
@@ -73,7 +73,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- page_yaml ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("page_yaml",
 			mcp.WithDescription("Get a YAML semantic structure of the page. Much more useful than raw HTML — strips styling noise, shows logical structure with spatial positions."),
 			mcp.WithString("selector", mcp.Description("CSS selector for subtree (omit for full page)")),
@@ -85,7 +85,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- get_html ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_html",
 			mcp.WithDescription("Get the HTML of the page or a specific element. Supports depth limiting to avoid massive output."),
 			mcp.WithString("selector", mcp.Description("CSS selector (omit for full page)")),
@@ -98,7 +98,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- get_interactive_map ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("get_interactive_map",
 			mcp.WithDescription("Get ALL interactive elements (buttons, links, inputs, etc.) with their positions, text, selectors, and attributes. Spatial map for understanding page layout and available actions."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -107,7 +107,7 @@ func registerDomTools(s *server.MCPServer) {
 	)
 
 	// --- query_elements ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("query_elements",
 			mcp.WithDescription("Query elements by CSS selector. Returns matching elements with positions, text, and attributes."),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),

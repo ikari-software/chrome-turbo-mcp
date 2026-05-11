@@ -192,7 +192,7 @@ func toolCount() int {
 
 func registerCustomTools(s *server.MCPServer) {
 	// --- create_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("create_tool",
 			mcp.WithDescription("Create a reusable custom tool. The tool is saved to disk and persists across sessions. The code runs in the page context with access to a `params` object. Use `run_tool` to execute it later."),
 			mcp.WithString("name", mcp.Required(), mcp.Description(`Tool name (lowercase, no spaces — e.g. "get_field_info")`)),
@@ -216,7 +216,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- run_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("run_tool",
 			mcp.WithDescription("Run a previously created custom tool by name. Pass arguments as a JSON object."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Name of the custom tool to run")),
@@ -228,7 +228,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- list_custom_tools ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("list_custom_tools",
 			mcp.WithDescription("List all saved custom tools with their descriptions and parameters."),
 		),
@@ -236,7 +236,7 @@ func registerCustomTools(s *server.MCPServer) {
 	)
 
 	// --- delete_tool ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("delete_tool",
 			mcp.WithDescription("Delete a custom tool by name."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Name of the custom tool to delete")),

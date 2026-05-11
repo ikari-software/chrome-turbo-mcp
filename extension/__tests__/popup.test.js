@@ -31,7 +31,8 @@ beforeAll(() => {
   const filePath = path.resolve(__dirname, '../popup.js');
   let code = fs.readFileSync(filePath, 'utf8');
   const fns = [
-    'renderStatus', 'renderActivity', 'renderStats', 'updateEntry',
+    'renderStatus', 'renderActivity', 'renderStats',
+    'renderClients', 'rerenderLog', 'entries',
     'durClass', 'durText', 'formatUptime',
   ].join(', ');
 
@@ -49,6 +50,9 @@ beforeEach(() => {
   if (log) {
     log.innerHTML = '<div class="empty" id="empty-msg">Waiting for commands...</div>';
   }
+  // The popup's activity-log map is module-scoped; clear it so each test
+  // starts with a known empty state.
+  if (api?.entries?.clear) api.entries.clear();
   // Reset stat values
   const cmds = document.getElementById('s-cmds');
   if (cmds) cmds.textContent = '0';

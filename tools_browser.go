@@ -11,7 +11,7 @@ import (
 
 func registerBrowserTools(s *server.MCPServer) {
 	// --- launch_browser ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("launch_browser",
 			mcp.WithDescription("Launch a new Chrome instance with stealth flags (--silent-debugger-extension-api to hide the debugging infobar). Auto-loads the extension. Uses a dedicated profile so it won't affect your main browser."),
 			mcp.WithBoolean("headless", mcp.Description("Launch in headless mode (default false)")),
@@ -20,7 +20,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	)
 
 	// --- connection_status ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("connection_status",
 			mcp.WithDescription("Check if the browser extension and/or BiDi are connected to the MCP server"),
 		),
@@ -28,7 +28,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	)
 
 	// --- list_tabs ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("list_tabs",
 			mcp.WithDescription("List all open Chrome tabs with their IDs, titles, and URLs"),
 		),
@@ -36,7 +36,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	)
 
 	// --- navigate ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("navigate",
 			mcp.WithDescription("Navigate a tab to a URL. Omit tabId to use the active tab."),
 			mcp.WithString("url", mcp.Required(), mcp.Description("URL to navigate to")),
@@ -46,7 +46,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	)
 
 	// --- screenshot ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("screenshot",
 			mcp.WithDescription("Take a screenshot of a tab. Returns a JPEG image scaled to maxWidth (default 1280px, NOT retina 3000px). Fast and compact."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
@@ -57,7 +57,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	)
 
 	// --- turbo_snapshot ---
-	s.AddTool(
+	addTool(s,
 		mcp.NewTool("turbo_snapshot",
 			mcp.WithDescription("TURBO: Screenshot + interactive element map in ONE call. Returns a scaled JPEG image AND a JSON spatial map of all interactive elements. The fastest way to understand a page."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
