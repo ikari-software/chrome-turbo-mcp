@@ -6,30 +6,83 @@
   'use strict';
 
   // --- Selector generation ---
+  // Build a CSS selector that uniquely identifies an element. Walks up
+  // the DOM building tag>nth-of-type>... chains, and verifies after each
+  // level that the chain resolves to exactly this element. Stops as
+  // soon as uniqueness is achieved, or when we hit an id-bearing
+  // ancestor (which anchors the chain). Capped at 15 levels so we don't
+  // hammer querySelectorAll on pathological trees.
+  //
+  // The previous implementation capped at 5 levels and never checked
+  // uniqueness — the result was that on a complex SPA, querySelector()
+  // for the generated selector returned the *first* tree-order match,
+  // which could be anywhere in the document. Both the cursor animation
+  // (resolveTarget) and the real DOM click (clickElement) re-resolve
+  // via that selector, so the two were consistently going to the wrong
+  // element. This fix is what makes the click animation actually point
+  // at the thing the agent meant to click.
   function sel(el) {
-    if (el.id) return '#' + CSS.escape(el.id);
-    const tid = el.getAttribute('data-testid');
-    if (tid) return `[data-testid="${tid}"]`;
+    if (!el || !el.tagName) return '';
+    // Best case: element itself has an id.
+    if (el.id) {
+      const trial = '#' + CSS.escape(el.id);
+      if (selectorMatchesOnly(trial, el)) return trial;
+    }
+    // Next best: data-testid on the element.
+    const tid = el.getAttribute && el.getAttribute('data-testid');
+    if (tid) {
+      const trial = `[data-testid=${JSON.stringify(tid)}]`;
+      if (selectorMatchesOnly(trial, el)) return trial;
+    }
+
     const parts = [];
     let cur = el;
-    for (let i = 0; i < 5 && cur && cur !== document.body && cur !== document.documentElement; i++) {
-      let s = cur.tagName.toLowerCase();
-      if (cur.id) { parts.unshift('#' + CSS.escape(cur.id)); break; }
-      const parent = cur.parentElement;
-      if (parent) {
-        const sibs = parent.children;
-        if (sibs.length > 1) {
-          const same = Array.from(sibs).filter(node => node.tagName === cur.tagName);
-          if (same.length > 1) {
-            const idx = same.indexOf(cur) + 1;
-            s += ':nth-of-type(' + idx + ')';
+    for (let depth = 0; depth < 15 && cur && cur !== document.body && cur !== document.documentElement; depth++) {
+      let segment;
+      if (cur.id) {
+        segment = '#' + CSS.escape(cur.id);
+      } else {
+        segment = cur.tagName.toLowerCase();
+        const td = cur.getAttribute && cur.getAttribute('data-testid');
+        if (td) {
+          segment += `[data-testid=${JSON.stringify(td)}]`;
+        } else {
+          const parent = cur.parentElement;
+          if (parent) {
+            const same = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+            if (same.length > 1) {
+              segment += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')';
+            }
           }
         }
       }
-      parts.unshift(s);
-      cur = parent;
+      parts.unshift(segment);
+
+      // After each prepend, re-check uniqueness. Done as soon as it
+      // resolves to exactly our target.
+      const trial = parts.join('>');
+      if (selectorMatchesOnly(trial, el)) return trial;
+
+      // An id-bearing ancestor anchors the chain. Going further only
+      // adds a redundant prefix.
+      if (cur.id && cur !== el) break;
+
+      cur = cur.parentElement;
     }
+
+    // Fallback: didn't reach uniqueness within the depth cap. Return
+    // the longest chain we built — better than nothing, and consistent
+    // with the chain the agent will use to re-resolve.
     return parts.join('>');
+  }
+
+  function selectorMatchesOnly(selector, target) {
+    try {
+      const matches = document.querySelectorAll(selector);
+      return matches.length === 1 && matches[0] === target;
+    } catch {
+      return false;
+    }
   }
 
   // --- Viewport info (included in many responses) ---
@@ -659,6 +712,27 @@
     // After this much agent inactivity the cursor and badge fade away so
     // they don't permanently obscure the page.
     const IDLE_FADE_MS = 45_000;
+    // Bottom toast (per-tool intent) lingers 2.5× longer than before so
+    // the user has time to actually read it before it fades.
+    const TOAST_LIFETIME_MS = 7_000;
+    // Hard ceiling on how long the badge can stay up if the agent never
+    // sends a result/error. Normally the badge fades shortly after the
+    // last active task ends (see markTaskEnd).
+    const BADGE_MAX_LIFETIME_MS = 60_000;
+    // Grace period from "all tasks done" to badge fade-out — gives the
+    // human a beat to register the final intent before it disappears.
+    const BADGE_TASK_END_GRACE_MS = 1_800;
+
+    // Set of in-flight command IDs. Populated by showStart('start'),
+    // drained by showResult/showError. Badge stays up while non-empty.
+    const activeTasks = new Set();
+
+    // Mouse-proximity state. Updated on document.mousemove (passive,
+    // rAF-coalesced); badge + toast opacity is recomputed each frame
+    // based on distance from the cursor's bounding rect.
+    let mouseX = -10000, mouseY = -10000;
+    let proximityRafPending = false;
+    let proximityInstalled = false;
 
     function robotSVG(size = 14, color = '#d29922') {
       return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
@@ -696,17 +770,25 @@
           font: 11px/1.2 'SF Mono', Menlo, monospace;
           backdrop-filter: blur(6px);
           opacity: 0;
-          transition: opacity 200ms ease;
+          /* Faster transition on opacity so the proximity fade tracks
+             the mouse without a noticeable lag, but still smooth enough
+             for the fade-in/out edge transitions to look intentional. */
+          transition: opacity 120ms ease;
           max-width: 360px;
           pointer-events: none;
         }
-        .badge.on { opacity: 1; }
+        /* When the badge is "on", its opacity is driven by the
+           --proximity CSS variable that mouse-proximity logic updates
+           in JS. Default is 0.95 (no mouse near). When the mouse is
+           directly over the badge it goes near-transparent so the user
+           can read the page beneath. */
+        .badge.on { opacity: var(--proximity, 0.95); }
         .badge .agent-name { color: #d29922; font-weight: 600; flex-shrink: 0; }
         .badge .label { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge svg { flex-shrink: 0; }
         .cursor {
           position: fixed; top: 0; left: 0;
-          width: 28px; height: 28px;
+          width: 24px; height: 24px;
           transform: translate(-1000px, -1000px);
           will-change: transform;
           pointer-events: none;
@@ -716,17 +798,22 @@
           filter: drop-shadow(0 4px 8px rgba(0,0,0,0.4));
         }
         .cursor.on { opacity: 1; }
-        .cursor svg.pointer { width: 24px; height: 24px; }
+        .cursor svg.pointer { width: 24px; height: 24px; display: block; }
+        /* Robot is a small "name tag" attached above-right of the pointer
+           so it doesn't fight the pointer for the user's eye. The
+           pointer's tip is what marks the click point; the robot just
+           identifies WHO is clicking. */
         .cursor .robot {
           position: absolute;
-          top: 14px; left: 16px;
-          width: 22px; height: 22px;
+          top: -6px; left: 14px;
+          width: 14px; height: 14px;
           background: #d29922;
           border-radius: 50%;
           display: flex; align-items: center; justify-content: center;
-          box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+          box-shadow: 0 1px 4px rgba(0,0,0,0.4);
           border: 1.5px solid #0d1117;
         }
+        .cursor .robot svg { width: 9px; height: 9px; }
         .cursor.click .pointer { animation: clickPulse 350ms ease-out; }
         @keyframes clickPulse {
           0%   { transform: scale(1); }
@@ -887,13 +974,16 @@
           color: #c9d1d9;
           font: 12px/1.3 'SF Mono', Menlo, monospace;
           opacity: 0;
-          transition: opacity 200ms ease, transform 200ms ease;
+          /* Short transition so mouse-proximity opacity updates feel
+             responsive; transform transitions still convey the
+             entrance/exit. */
+          transition: opacity 120ms ease, transform 200ms ease;
           max-width: 80vw;
           backdrop-filter: blur(6px);
           pointer-events: none;
           font-style: italic;
         }
-        .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast.on { opacity: var(--proximity, 0.95); transform: translateX(-50%) translateY(0); }
         .toast .who { color: #d29922; font-weight: 600; font-style: normal; margin-right: 6px; }
       `;
 
@@ -932,10 +1022,32 @@
       badge.querySelector('.agent-name').textContent = display || 'Agent';
       badge.querySelector('.label').textContent = intent || 'working…';
       badge.classList.add('on');
+      installProximityListener();
       clearTimeout(badgeTimer);
-      // Fade after a few seconds of inactivity so we don't permanently
-      // obscure the page.
-      badgeTimer = setTimeout(() => badge.classList.remove('on'), 7000);
+      // Hard ceiling — if showResult/showError never fire (shouldn't
+      // happen but be defensive), the badge fades after BADGE_MAX.
+      // Normal lifecycle: stays up while activeTasks is non-empty; fades
+      // BADGE_TASK_END_GRACE_MS after the last task ends.
+      badgeTimer = setTimeout(() => badge.classList.remove('on'), BADGE_MAX_LIFETIME_MS);
+    }
+
+    // markTaskStart / markTaskEnd track the set of in-flight commands so
+    // the badge stays visible as long as the agent is actively doing
+    // something. The grace period after the last task gives the human a
+    // beat to read the final intent before the badge fades.
+    function markTaskStart(id) {
+      if (!id) return;
+      activeTasks.add(id);
+      clearTimeout(badgeTimer);
+      badgeTimer = setTimeout(() => badge && badge.classList.remove('on'), BADGE_MAX_LIFETIME_MS);
+    }
+    function markTaskEnd(id) {
+      if (!id) return;
+      activeTasks.delete(id);
+      if (activeTasks.size === 0) {
+        clearTimeout(badgeTimer);
+        badgeTimer = setTimeout(() => badge && badge.classList.remove('on'), BADGE_TASK_END_GRACE_MS);
+      }
     }
 
     function moveCursorTo(x, y, opts = {}) {
@@ -976,9 +1088,11 @@
           const u = 1 - eased;
           const cx = u * u * start.x + 2 * u * eased * midX + eased * eased * x;
           const cy = u * u * start.y + 2 * u * eased * midY + eased * eased * y;
-          // The pointer's hot-spot is at top-left; offset so the visible
-          // tip lines up with (x, y).
-          cursor.style.transform = `translate(${cx - 4}px, ${cy - 4}px)`;
+          // The pointer SVG path starts at "M5 3" — the visible tip is
+          // at offset (5, 3) inside the 24×24 wrapper. Offset the
+          // translate by that amount so the tip lands exactly on
+          // (x, y), not the wrapper's top-left corner.
+          cursor.style.transform = `translate(${cx - 5}px, ${cy - 3}px)`;
           if (t < 1) requestAnimationFrame(step);
           else {
             cursorPos = { x, y };
@@ -1159,8 +1273,51 @@
       if (!toastEl) return;
       toastEl.innerHTML = (who ? `<span class="who">${escapeHtml(who)}</span>` : '') + escapeHtml(text);
       toastEl.classList.add('on');
+      installProximityListener();
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toastEl.classList.remove('on'), 2800);
+      toastTimer = setTimeout(() => toastEl.classList.remove('on'), TOAST_LIFETIME_MS);
+    }
+
+    // Mouse-proximity: when the user moves the mouse near (or over) the
+    // badge or the toast, the element fades. Stays opaque when the
+    // mouse is far away (>150px from the nearest edge), goes near-
+    // transparent (0.15) when the mouse is directly on it, and ramps
+    // smoothly between.
+    //
+    // pointer-events: none on the overlay means the elements already
+    // pass clicks/etc. through to the page, so this is purely about
+    // visual access — the user can read whatever is behind the toast
+    // by waving the mouse over it.
+    function installProximityListener() {
+      if (proximityInstalled) return;
+      document.addEventListener('mousemove', (e) => {
+        mouseX = e.clientX;
+        mouseY = e.clientY;
+        if (proximityRafPending) return;
+        proximityRafPending = true;
+        requestAnimationFrame(() => {
+          proximityRafPending = false;
+          updateProximityOpacity();
+        });
+      }, { passive: true, capture: true });
+      proximityInstalled = true;
+    }
+    function updateProximityOpacity() {
+      for (const el of [badge, toastEl]) {
+        if (!el) continue;
+        if (!el.classList.contains('on')) continue;
+        const r = el.getBoundingClientRect();
+        const dx = Math.max(0, r.left - mouseX, mouseX - r.right);
+        const dy = Math.max(0, r.top - mouseY, mouseY - r.bottom);
+        const dist = Math.hypot(dx, dy);
+        // Piecewise: 0px → 0.15, 50px → 0.55, ≥150px → 0.95.
+        let opacity;
+        if (dist <= 0) opacity = 0.15;
+        else if (dist < 50) opacity = 0.15 + (dist / 50) * 0.40;        // 0.15 → 0.55
+        else if (dist < 150) opacity = 0.55 + ((dist - 50) / 100) * 0.40; // 0.55 → 0.95
+        else opacity = 0.95;
+        el.style.setProperty('--proximity', opacity.toFixed(2));
+      }
     }
 
     function escapeHtml(s) {
@@ -1229,8 +1386,9 @@
     ]);
     const CAMERA_FLASH_ACTIONS = new Set(['screenshot', 'turbo_snapshot']);
 
-    async function showStart({ action, intent, clientLabel, clientType, params }) {
+    async function showStart({ action, intent, clientLabel, clientType, params, id }) {
       try {
+        markTaskStart(id);
         const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
         setBadge({ display, intent: intent || `${action}…` });
         if (intent) showToast(intent, display);
@@ -1271,8 +1429,9 @@
     // already place a cursor on the page during showStart: find_text and
     // extract_text get a moving loupe sweep, get_interactive_map gets a
     // scan-flash over every interactive element. Anything else is silent.
-    async function showResult({ action, result }) {
+    async function showResult({ action, result, id }) {
       try {
+        markTaskEnd(id);
         if (!result) return;
         if (action === 'find_text' && Array.isArray(result.results)) {
           // Cap so a 50-match find doesn't take 10 seconds to play out.
@@ -1294,8 +1453,9 @@
     // showError flashes a red ripple at the current cursor position and
     // shakes the cursor — a glance-readable "that just failed" cue
     // without forcing the user to expand the popup activity row.
-    function showError({ action, error }) {
+    function showError({ action, error, id }) {
       try {
+        markTaskEnd(id);
         ensure();
         if (cursor) {
           cursor.classList.add('on');
