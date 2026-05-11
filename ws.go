@@ -74,13 +74,14 @@ var (
 	relayClientsMu sync.Mutex
 )
 
-// relayClientInfo tracks metadata for a connected MCP relay client.
+// relayClientInfo tracks metadata for a connected MCP relay client. We
+// only keep what the popup actually renders: label (display), sessionType
+// (chip), pid (debug hint), and connection time. The raw initialize
+// client name/version were never consumed and just bloated the payload.
 type relayClientInfo struct {
 	conn        *websocket.Conn
 	label       string
 	sessionType string
-	client      string // raw initialize clientInfo.name
-	version     string // raw initialize clientInfo.version
 	pid         int
 	connectedAt time.Time
 }
@@ -144,16 +145,12 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			Type        string `json:"type"`
 			Label       string `json:"label"`
 			SessionType string `json:"sessionType"`
-			Client      string `json:"client"`
-			Version     string `json:"version"`
 			PID         int    `json:"pid"`
 		}
 		if json.Unmarshal(message, &ctrl) == nil && ctrl.Type == "register" {
 			relayClientsMu.Lock()
 			info.label = ctrl.Label
 			info.sessionType = ctrl.SessionType
-			info.client = ctrl.Client
-			info.version = ctrl.Version
 			info.pid = ctrl.PID
 			relayClientsMu.Unlock()
 			logger.Printf("Relay client registered: label=%s type=%s pid=%d", ctrl.Label, ctrl.SessionType, ctrl.PID)
@@ -207,18 +204,17 @@ func broadcastClientsToBrowsers() {
 
 	relayClientsMu.Lock()
 	for _, c := range relayClients {
+		label := c.label
+		if label == "" {
+			label = fmt.Sprintf("anon#%p", c.conn)
+		}
 		entry := map[string]any{
-			"label":       c.label,
+			"label":       label,
 			"sessionType": c.sessionType,
-			"client":      c.client,
-			"version":     c.version,
 			"connectedAt": c.connectedAt.UnixMilli(),
 		}
 		if c.pid != 0 {
 			entry["pid"] = c.pid
-		}
-		if c.label == "" {
-			entry["label"] = fmt.Sprintf("anon#%p", c.conn)
 		}
 		clients = append(clients, entry)
 	}
@@ -310,8 +306,6 @@ func connectRelay() {
 			"type":        "register",
 			"label":       sess["label"],
 			"sessionType": sess["sessionType"],
-			"client":      sess["client"],
-			"version":     sess["version"],
 			"pid":         sess["pid"],
 		})
 		relayMu.Lock()

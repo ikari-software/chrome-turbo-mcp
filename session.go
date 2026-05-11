@@ -18,11 +18,9 @@ import (
 // extension popup so a human can see which agent (Claude Code in some folder,
 // Cursor, etc.) is driving the browser at any given moment.
 var (
-	sessionMu       sync.RWMutex
-	sessionLabel    string // human-friendly id, e.g. "claude-code/turboweb-mcp-by-ikari#42891"
-	sessionType     string // "claude-code", "cursor", "claude-desktop", or ""
-	sessionClient   string // raw client name from initialize, e.g. "claude-ai"
-	sessionVersion  string // raw client version from initialize
+	sessionMu        sync.RWMutex
+	sessionLabel     string // human-friendly id, e.g. "claude-code/turboweb-mcp-by-ikari#42891"
+	sessionType      string // "claude-code", "cursor", "claude-desktop", or ""
 	sessionStartedAt = time.Now()
 )
 
@@ -56,16 +54,14 @@ func initSession() {
 }
 
 // refineSessionFromInitialize updates session metadata once the MCP client
-// has sent its name/version via initialize.
-func refineSessionFromInitialize(name, version string) {
+// has sent its name (and optionally version) via initialize. The version
+// is ignored — we only need a session type and a label for the popup.
+func refineSessionFromInitialize(name, _ string) {
 	if name == "" {
 		return
 	}
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
-
-	sessionClient = name
-	sessionVersion = version
 
 	// Re-derive type from the client name — more authoritative than parent process.
 	t := normaliseClientType(name)
@@ -97,8 +93,6 @@ func snapshotSession() map[string]any {
 	return map[string]any{
 		"label":       sessionLabel,
 		"sessionType": sessionType,
-		"client":      sessionClient,
-		"version":     sessionVersion,
 		"connectedAt": sessionStartedAt.UnixMilli(),
 		"pid":         os.Getpid(),
 		"ppid":        os.Getppid(),

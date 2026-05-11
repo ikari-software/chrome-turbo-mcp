@@ -817,6 +817,65 @@
           60%      { transform: translateX(4px)  scale(1); }
           80%      { transform: translateX(-2px) scale(1); }
         }
+        /* Camera flash for screenshot / turbo_snapshot — quick whitish
+           pulse covering the whole viewport so the user can see the
+           snapshot the agent just grabbed. */
+        .camera-flash {
+          position: fixed;
+          inset: 0;
+          background: rgba(255, 255, 255, 0.4);
+          pointer-events: none;
+          animation: cameraFlashAnim 320ms ease-out forwards;
+        }
+        @keyframes cameraFlashAnim {
+          0%   { opacity: 0;    }
+          20%  { opacity: 1;    }
+          100% { opacity: 0;    }
+        }
+        /* Read sweep: a thin horizontal scanline that travels top→bottom
+           in ~520ms, marking "the agent is reading the DOM". Used for
+           get_html, page_yaml, dom_snapshot, get_accessibility_tree,
+           query_elements, get_storage, get_cookies — anything that
+           doesn't have a more specific visualisation. */
+        .read-sweep {
+          position: fixed;
+          left: 0;
+          width: 100vw;
+          height: 3px;
+          top: 0;
+          background: linear-gradient(to right,
+            transparent 0%,
+            rgba(88, 166, 255, 0.6) 30%,
+            rgba(88, 166, 255, 0.9) 50%,
+            rgba(88, 166, 255, 0.6) 70%,
+            transparent 100%);
+          box-shadow: 0 0 12px rgba(88, 166, 255, 0.6);
+          pointer-events: none;
+          animation: readSweepAnim 520ms cubic-bezier(0.4, 0, 0.6, 1) forwards;
+        }
+        @keyframes readSweepAnim {
+          0%   { top: 0;     opacity: 0; }
+          15%  { opacity: 1;             }
+          85%  { opacity: 1;             }
+          100% { top: 100vh; opacity: 0; }
+        }
+        /* Network/console/storage indicator — small icon pulse near the
+           agent badge so monitoring ops register as something even if
+           there's no visible page change. */
+        .data-pulse {
+          position: fixed;
+          top: 40px; right: 20px;
+          width: 24px; height: 24px;
+          border: 2px solid #3fb950;
+          border-radius: 50%;
+          pointer-events: none;
+          animation: dataPulseAnim 600ms ease-out forwards;
+        }
+        @keyframes dataPulseAnim {
+          0%   { transform: scale(0.5); opacity: 0; }
+          40%  { transform: scale(1.1); opacity: 1; }
+          100% { transform: scale(0.95); opacity: 0; }
+        }
         .toast {
           position: fixed;
           bottom: 24px; left: 50%;
@@ -1039,6 +1098,46 @@
       }
     }
 
+    // cameraFlash: viewport-wide white pulse, used when the agent takes
+    // a screenshot. Reads as "snap" — a beat the user can register even
+    // if the page itself didn't visibly change.
+    function cameraFlash() {
+      ensure();
+      if (!root) return;
+      const f = document.createElement('div');
+      f.className = 'camera-flash';
+      root.appendChild(f);
+      setTimeout(() => f.remove(), 360);
+    }
+
+    // readSweep: a thin scanline travelling top→bottom across the
+    // viewport. Used as the generic "agent is reading the page" cue for
+    // any DOM-read tool that doesn't have a more specific visualisation
+    // (get_html, page_yaml, dom_snapshot, get_accessibility_tree,
+    // query_elements, get_storage, get_cookies, etc.).
+    function readSweep() {
+      ensure();
+      if (!root) return;
+      const s = document.createElement('div');
+      s.className = 'read-sweep';
+      root.appendChild(s);
+      setTimeout(() => s.remove(), 560);
+    }
+
+    // dataPulse: a small green ring near the top-right corner, used when
+    // the agent peeks at non-DOM state (network log, console messages,
+    // cookies, storage). Doesn't move the cursor — these ops touch
+    // browser state, not the page itself, so animating across the page
+    // would be misleading.
+    function dataPulse() {
+      ensure();
+      if (!root) return;
+      const p = document.createElement('div');
+      p.className = 'data-pulse';
+      root.appendChild(p);
+      setTimeout(() => p.remove(), 650);
+    }
+
     // scanLoupe: animate the agent cursor across a sequence of result
     // bboxes (find_text, extract_text), placing a loupe at each. Caller
     // is responsible for capping the items list to avoid 30s scans.
@@ -1107,6 +1206,29 @@
       return null;
     }
 
+    // Read-only ops that don't have a more specific visualisation in
+    // resolveTarget / showResult. We render a generic "agent is reading
+    // the page" sweep so the user sees *something* fire when these run —
+    // otherwise the popup activity row is the only signal.
+    const READ_SWEEP_ACTIONS = new Set([
+      'get_html', 'page_yaml', 'get_page_structure',
+      'dom_snapshot', 'get_accessibility_tree',
+      'query_elements',
+    ]);
+    // Ops that touch browser state, not the page DOM. Visualised with a
+    // small corner pulse rather than a page-wide sweep — animating across
+    // the page would be misleading.
+    const DATA_PULSE_ACTIONS = new Set([
+      'get_cookies', 'set_cookie', 'delete_cookies',
+      'get_storage',
+      'network_get', 'network_enable', 'network_disable',
+      'network_get_body', 'network_throttle',
+      'console_get', 'console_enable', 'console_disable', 'console_clear',
+      'get_performance', 'css_coverage_start', 'css_coverage_stop',
+      'emulate_device', 'page_reload',
+    ]);
+    const CAMERA_FLASH_ACTIONS = new Set(['screenshot', 'turbo_snapshot']);
+
     async function showStart({ action, intent, clientLabel, clientType, params }) {
       try {
         const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
@@ -1125,6 +1247,15 @@
             flashAt(target.x, target.y, palette);
             if (target.bbox) highlightRect(target.bbox, palette);
           }
+        } else if (CAMERA_FLASH_ACTIONS.has(action)) {
+          // turbo_snapshot also fires its element scan-flash via
+          // showResult once the result comes back; the camera flash up
+          // front is the "the agent just photographed the page" beat.
+          cameraFlash();
+        } else if (READ_SWEEP_ACTIONS.has(action)) {
+          readSweep();
+        } else if (DATA_PULSE_ACTIONS.has(action)) {
+          dataPulse();
         }
       } catch (e) {
         // Overlay is non-critical; never throw upstream.
