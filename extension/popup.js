@@ -166,7 +166,17 @@ function renderActivity(data) {
 
 function rerenderLog() {
   const log = document.getElementById('log');
-  log.innerHTML = '';
+  if (!log) return;
+
+  // Skip the rebuild when the popup is hidden — no point spending CPU on
+  // a window the user isn't looking at. A visibilitychange listener
+  // (registered once below) catches up on the next reveal so the user
+  // sees current state when they refocus.
+  if (typeof document !== 'undefined' && document.hidden) {
+    pendingRerender = true;
+    return;
+  }
+  pendingRerender = false;
 
   const list = [...entries.values()];
   // newest first
@@ -181,14 +191,25 @@ function rerenderLog() {
     msg.className = 'empty';
     msg.id = 'empty-msg';
     msg.textContent = filterText ? 'No matches' : 'Waiting for commands...';
-    log.appendChild(msg);
+    // One DOM mutation instead of innerHTML='' + appendChild.
+    log.replaceChildren(msg);
     return;
   }
 
-  // Cap the rendered list to keep DOM small.
-  for (const e of filtered.slice(0, 100)) {
-    log.appendChild(buildEntryRow(e));
-  }
+  // Build all rows in memory, then commit with a single replaceChildren —
+  // one reflow per re-render instead of one per row, which matters during
+  // chained agent loops where dozens of commands can fire in a second.
+  const rows = filtered.slice(0, 100).map(buildEntryRow);
+  log.replaceChildren(...rows);
+}
+
+// Set when a rerender was skipped because the document was hidden. The
+// visibilitychange listener below flushes it on reveal.
+let pendingRerender = false;
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && pendingRerender) rerenderLog();
+  });
 }
 
 function entryMatchesFilter(e, q) {
