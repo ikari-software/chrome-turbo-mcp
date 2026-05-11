@@ -1,4 +1,4 @@
-// Chrome Turbo MCP — Content Script
+// TurboWeb MCP by ikari — Content Script
 // Runs in every page. Handles DOM queries, spatial mapping, OCR, clicks, typing.
 // Communicates with background.js via chrome.runtime messages.
 

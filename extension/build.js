@@ -37,13 +37,14 @@ function build() {
       // Add gecko settings
       m.browser_specific_settings = {
         gecko: {
-          id: 'turbo-mcp@turbo.local',
+          id: 'turboweb-mcp@ikari.local',
           strict_min_version: '128.0',
         },
       };
-      // Rename (drop "Chrome" prefix)
-      m.name = 'Turbo MCP';
-      m.action.default_title = 'Turbo MCP';
+      // Display name in Firefox — same as Chrome's, kept consistent
+      // since the extension is browser-agnostic.
+      m.name = 'TurboWeb MCP by ikari';
+      m.action.default_title = 'TurboWeb MCP by ikari';
     }
 
     fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(m, null, 2) + '\n');

@@ -5,6 +5,7 @@ node_modules/
 *.tsbuildinfo
 
 # Stray top-level binary (built when running `go build` without -o)
+/turboweb-mcp-by-ikari
 /chrome-turbo-mcp
 
 # Test artifacts

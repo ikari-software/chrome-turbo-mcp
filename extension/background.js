@@ -1,4 +1,4 @@
-// Chrome Turbo MCP — Background Service Worker
+// TurboWeb MCP by ikari — Background Service Worker
 // WebSocket client → MCP server. Routes commands to content scripts or handles locally.
 
 const WS_URL = 'ws://127.0.0.1:18321';
@@ -692,4 +692,4 @@ async function dispatch(action, params) {
 
 // --- Start ---
 connect();
-console.log('[turbo] Chrome Turbo MCP background started');
+console.log('[turbo] TurboWeb MCP background started');

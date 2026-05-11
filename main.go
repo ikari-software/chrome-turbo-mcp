@@ -10,7 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-var logger = log.New(os.Stderr, "[chrome-turbo] ", 0)
+var logger = log.New(os.Stderr, "[turboweb] ", 0)
 
 func main() {
 	// --ws-server: run as a standalone WebSocket daemon (no MCP stdio).
@@ -36,7 +36,7 @@ func main() {
 	hooks.AddAfterInitialize(initializeHook())
 
 	s := server.NewMCPServer(
-		"chrome-turbo",
+		"turboweb",
 		"1.0.0",
 		server.WithToolCapabilities(false),
 		server.WithHooks(hooks),
@@ -47,7 +47,7 @@ func main() {
 		// overlay rely on this so the human user can follow along
 		// without having to expand each tool-call dump.
 		server.WithInstructions(strings.TrimSpace(`
-Chrome Turbo MCP drives a real browser tab on the user's screen. EVERY tool call
+TurboWeb MCP drives a real browser tab on the user's screen. EVERY tool call
 MUST include an `+"`intent`"+` argument: one short sentence in natural language
 describing what you are about to do (and ideally why). It is shown live in the
 extension popup and as a toast on the page itself, so the user can follow your
@@ -60,7 +60,7 @@ it blank makes the on-page overlay silent and confuses the user watching.
 
 	registerAllTools(s)
 
-	logger.Printf("MCP server running (stdio) — session: %s", getSessionLabel())
+	logger.Printf("turboweb MCP server running (stdio) — session: %s", getSessionLabel())
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
@@ -94,7 +94,7 @@ const intentParamDescription = "Required: a one-sentence narration of what you'r
 // `intent` is marked Required so MCP hosts that validate input (Claude Code,
 // Cursor, etc.) reject calls without one — forcing the agent to write a
 // one-line narration before the tool executes. This is what makes the
-// "calling chrome-turbo 2 times" transcript line in Claude Code expand to
+// "calling turboweb 2 times" transcript line in Claude Code expand to
 // readable per-call descriptions.
 func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc) {
 	if tool.InputSchema.Properties == nil {

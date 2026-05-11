@@ -17,20 +17,51 @@ import (
 
 var db *sql.DB
 
+// configDirName is the per-user config folder for turboweb-mcp-by-ikari.
+// legacyConfigDirName is the pre-rebrand folder, kept so existing users
+// don't lose their saved custom tools when they upgrade.
+const (
+	configDirName       = "turboweb-mcp-by-ikari"
+	legacyConfigDirName = "chrome-turbo-mcp"
+	dbFileName          = "turboweb.db"
+	legacyDBFileName    = "chrome-turbo.db"
+)
+
+// getConfigDir returns the directory holding turboweb's per-user state.
+// Honours XDG_CONFIG_HOME (Linux), APPDATA (Windows), or ~/.config (mac
+// and Linux fallback).
 func getConfigDir() string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "chrome-turbo-mcp")
+		return filepath.Join(dir, configDirName)
 	}
 	if runtime.GOOS == "windows" {
 		if dir := os.Getenv("APPDATA"); dir != "" {
-			return filepath.Join(dir, "chrome-turbo-mcp")
+			return filepath.Join(dir, configDirName)
 		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".chrome-turbo-mcp")
+		return filepath.Join(".", "."+configDirName)
 	}
-	return filepath.Join(home, ".config", "chrome-turbo-mcp")
+	return filepath.Join(home, ".config", configDirName)
+}
+
+// getLegacyConfigDir returns the pre-rebrand config directory under the
+// same parent — used only by initDB to copy state forward on first run.
+func getLegacyConfigDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, legacyConfigDirName)
+	}
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("APPDATA"); dir != "" {
+			return filepath.Join(dir, legacyConfigDirName)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", "."+legacyConfigDirName)
+	}
+	return filepath.Join(home, ".config", legacyConfigDirName)
 }
 
 func initDB() error {
@@ -38,7 +69,19 @@ func initDB() error {
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	dbPath := filepath.Join(configDir, "chrome-turbo.db")
+	dbPath := filepath.Join(configDir, dbFileName)
+
+	// One-shot migration: if the new dir doesn't have a DB yet but the
+	// pre-rebrand dir does, copy it forward. Non-destructive — the old
+	// file stays put so users can roll back if anything goes sideways.
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		legacyDB := filepath.Join(getLegacyConfigDir(), legacyDBFileName)
+		if data, rerr := os.ReadFile(legacyDB); rerr == nil {
+			if werr := os.WriteFile(dbPath, data, 0644); werr == nil {
+				logger.Printf("Migrated DB forward: %s -> %s", legacyDB, dbPath)
+			}
+		}
+	}
 
 	var err error
 	db, err = sql.Open("sqlite", dbPath)

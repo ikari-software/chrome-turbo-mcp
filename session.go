@@ -19,7 +19,7 @@ import (
 // Cursor, etc.) is driving the browser at any given moment.
 var (
 	sessionMu       sync.RWMutex
-	sessionLabel    string // human-friendly id, e.g. "claude-code/chrome-turbo-mcp#42891"
+	sessionLabel    string // human-friendly id, e.g. "claude-code/turboweb-mcp-by-ikari#42891"
 	sessionType     string // "claude-code", "cursor", "claude-desktop", or ""
 	sessionClient   string // raw client name from initialize, e.g. "claude-ai"
 	sessionVersion  string // raw client version from initialize
