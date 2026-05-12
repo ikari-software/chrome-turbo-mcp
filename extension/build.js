@@ -11,7 +11,21 @@ const path = require('path');
 const SRC = __dirname;
 const DIST = path.join(SRC, 'dist');
 const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js'];
+// Directory trees copied verbatim into each dist target. The browser
+// consumes `icons/` via manifest.icons + manifest.action.default_icon.
+const SHARED_DIRS = ['icons'];
 const WATCHED = [...SHARED, 'manifest.json'];
+
+function copyDir(src, dst) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) copyDir(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
 
 function build() {
   const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
@@ -26,6 +40,9 @@ function build() {
       if (fs.existsSync(src)) {
         fs.copyFileSync(src, path.join(out, f));
       }
+    }
+    for (const d of SHARED_DIRS) {
+      copyDir(path.join(SRC, d), path.join(out, d));
     }
 
     // Build target-specific manifest
