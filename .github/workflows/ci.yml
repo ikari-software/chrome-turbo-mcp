@@ -21,11 +21,8 @@ jobs:
       - run: go build ./...
 
   extension:
-    name: extension (vitest + build)
+    name: extension (vitest + build + package)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: extension
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,6 +30,34 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: extension/package-lock.json
-      - run: npm ci
-      - run: npm test -- --run
-      - run: node build.js
+      - name: Install
+        working-directory: extension
+        run: npm ci
+      - name: Test
+        working-directory: extension
+        run: npm test -- --run
+      - name: Build dist/{chrome,firefox}
+        working-directory: extension
+        run: node build.js
+      - name: Read version
+        id: ver
+        run: echo "v=$(node -p "require('./extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
+      # Single-file extensions: one zip per browser. The zip layout matches
+      # what each store expects (Chrome: zip of the unpacked dir; Firefox:
+      # same — `web-ext sign` accepts the bare zip too).
+      - name: Package chrome.zip
+        working-directory: extension/dist/chrome
+        run: zip -qr "$GITHUB_WORKSPACE/turboweb-mcp-by-ikari-extension-chrome-${{ steps.ver.outputs.v }}.zip" .
+      - name: Package firefox.zip
+        working-directory: extension/dist/firefox
+        run: zip -qr "$GITHUB_WORKSPACE/turboweb-mcp-by-ikari-extension-firefox-${{ steps.ver.outputs.v }}.zip" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turboweb-mcp-by-ikari-extension-chrome-${{ steps.ver.outputs.v }}
+          path: turboweb-mcp-by-ikari-extension-chrome-${{ steps.ver.outputs.v }}.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turboweb-mcp-by-ikari-extension-firefox-${{ steps.ver.outputs.v }}
+          path: turboweb-mcp-by-ikari-extension-firefox-${{ steps.ver.outputs.v }}.zip
+          if-no-files-found: error
