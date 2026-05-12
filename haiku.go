@@ -26,7 +26,10 @@ type HaikuClient struct {
 	model      string
 }
 
-var haiku *HaikuClient
+var (
+	haiku           *HaikuClient
+	haikuInitReason string // why haiku is nil; surfaced in the unavailable banner
+)
 
 func initHaiku() {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -34,6 +37,7 @@ func initHaiku() {
 		apiKey = os.Getenv("CLAUDE_API_KEY")
 	}
 	if apiKey == "" {
+		haikuInitReason = "no ANTHROPIC_API_KEY / CLAUDE_API_KEY in MCP server env at startup (the host may not be forwarding it — check the MCP `env` block in your client config)"
 		logger.Println("No ANTHROPIC_API_KEY or CLAUDE_API_KEY — Haiku preprocessing disabled (tools still work, return raw data)")
 		return
 	}
@@ -42,7 +46,7 @@ func initHaiku() {
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		model:      haikuModel,
 	}
-	logger.Println("Haiku preprocessing enabled")
+	logger.Printf("Haiku preprocessing enabled (model=%s)", haikuModel)
 }
 
 // Anthropic API types
@@ -178,11 +182,18 @@ func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 
 
 	case "haiku":
 		if haiku == nil {
-			return mcp.NewToolResultText("[Haiku unavailable (no ANTHROPIC_API_KEY) — raw data follows]\n" + string(rawData)), nil
+			reason := haikuInitReason
+			if reason == "" {
+				reason = "Haiku client not initialised"
+			}
+			return mcp.NewToolResultText("[Haiku unavailable (" + reason + ") — raw data follows]\n" + string(rawData)), nil
 		}
 		answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Haiku error: %v", err)), nil
+			// Don't hard-error the tool — surface the cause in the banner
+			// so the agent (and the human reading the transcript) can see
+			// _why_ Haiku failed (bad key, deprecated model, rate limit, …).
+			return mcp.NewToolResultText("[Haiku unavailable (" + err.Error() + ") — raw data follows]\n" + string(rawData)), nil
 		}
 		return mcp.NewToolResultText(answer), nil
 
@@ -191,14 +202,16 @@ func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 
 
 	default: // "auto"
 		// Prefer Haiku when configured — better quality, multimodal.
+		var haikuErr error
 		if haiku != nil {
 			answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
 			if err == nil {
 				return mcp.NewToolResultText(answer), nil
 			}
+			haikuErr = err
 			logger.Printf("Haiku error, falling back to local Gemini Nano: %v", err)
 		}
-		return askLocalOrRaw(rawData, question, systemPrompt)
+		return askLocalOrRawWithHaikuCause(rawData, question, systemPrompt, haikuErr)
 	}
 }
 
@@ -207,9 +220,26 @@ func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 
 // it returns the raw data with an explanatory prefix rather than erroring
 // the whole tool call.
 func askLocalOrRaw(rawData json.RawMessage, question, systemPrompt string) (*mcp.CallToolResult, error) {
+	return askLocalOrRawWithHaikuCause(rawData, question, systemPrompt, nil)
+}
+
+// askLocalOrRawWithHaikuCause is the auto-mode-aware fallback: if the
+// preceding Haiku attempt also failed, we surface _both_ causes in the
+// banner so the user isn't told only about the secondary local-AI failure.
+// Without this, an expired ANTHROPIC_API_KEY surfaces as the misleading
+// banner "[AI unavailable (no browser extensions connected) — raw data follows]"
+// when the real cause is the Anthropic 401.
+func askLocalOrRawWithHaikuCause(rawData json.RawMessage, question, systemPrompt string, haikuErr error) (*mcp.CallToolResult, error) {
 	answer, err := localAsk(question, string(rawData), systemPrompt)
 	if err == nil {
 		return mcp.NewToolResultText(answer), nil
 	}
-	return mcp.NewToolResultText("[AI unavailable (" + err.Error() + ") — raw data follows]\n" + string(rawData)), nil
+	cause := err.Error()
+	switch {
+	case haikuErr != nil:
+		cause = "haiku: " + haikuErr.Error() + "; local: " + err.Error()
+	case haiku == nil && haikuInitReason != "":
+		cause = "haiku: " + haikuInitReason + "; local: " + err.Error()
+	}
+	return mcp.NewToolResultText("[AI unavailable (" + cause + ") — raw data follows]\n" + string(rawData)), nil
 }

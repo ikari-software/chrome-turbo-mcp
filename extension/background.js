@@ -118,19 +118,20 @@ function updateBadge(connected) {
 
 // --- MV3 keepalive: prevent service worker from dying ---
 // Service workers get killed after ~30s of inactivity in MV3.
-// chrome.alarms fires every 25s to keep it alive while WS is connected.
+// chrome.alarms fires every 25s to wake us and *actively* probe the WS:
+// readyState can lie as OPEN even after Chrome silently dropped the
+// socket while we were suspended. The only reliable check is a JSON
+// ping with a bounded pong timeout — no pong → force-close → reconnect.
 const KEEPALIVE_ALARM = 'turbo-keepalive';
 const RECONNECT_ALARM = 'turbo-reconnect';
+const PING_TIMEOUT_MS = 3000;
+
+let pingPendingId = null;
+let pingPendingTimer = 0;
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Just being called keeps the SW alive. Also ping WS if connected.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      // WS is healthy, keep the alarm going
-    } else {
-      // WS is dead, reconnect
-      connect();
-    }
+    pingWS();
   }
   if (alarm.name === RECONNECT_ALARM) {
     connect();
@@ -143,6 +144,52 @@ function startKeepalive() {
 
 function stopKeepalive() {
   chrome.alarms.clear(KEEPALIVE_ALARM);
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+}
+
+// pingWS sends `{type:'ping'}` and arms a timer; if no pong arrives in
+// PING_TIMEOUT_MS, the WS is considered zombie and torn down so the
+// onclose handler kicks reconnection. This catches the "MV3 SW slept,
+// Chrome killed the socket, readyState still reads OPEN on wake" case
+// that produces the recurring "MCP isn't seeing a connection" report.
+function pingWS() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connect();
+    return;
+  }
+  if (pingPendingId) return; // a probe is already in flight
+  pingPendingId = '__ping_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  try {
+    ws.send(JSON.stringify({ type: 'ping', id: pingPendingId }));
+  } catch (e) {
+    // Synchronous send failure is itself a dead-socket signal.
+    forceReconnect('ping send failed: ' + (e?.message || e));
+    return;
+  }
+  pingPendingTimer = setTimeout(() => {
+    forceReconnect('no pong in ' + PING_TIMEOUT_MS + 'ms');
+  }, PING_TIMEOUT_MS);
+}
+
+function handlePong(id) {
+  if (id !== pingPendingId) return;
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+}
+
+function forceReconnect(reason) {
+  console.warn('[turbo] forcing reconnect:', reason);
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+  try { ws?.close(); } catch {}
+  ws = null;
+  updateBadge(false);
+  broadcast({ type: 'status', connected: false });
+  scheduleReconnect();
 }
 
 // --- WebSocket connection with auto-reconnect ---
@@ -169,6 +216,12 @@ function connect() {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) {
       console.warn('[turbo] Malformed WS message:', e.message, event.data?.substring?.(0, 200));
+      return;
+    }
+
+    // Active health-check response from the daemon.
+    if (msg.type === 'pong') {
+      handlePong(msg.id);
       return;
     }
 
@@ -356,7 +409,7 @@ async function notifyOverlay(tabId, payload) {
 // overlay returns immediately for them, so awaiting is harmless but we
 // still fire-and-forget to keep them snappy.
 const PAGE_ACTIONS_THAT_GATE_ON_CURSOR = new Set([
-  'click', 'cdp_click', 'type_text', 'cdp_type', 'inspect',
+  'click', 'cdp_click', 'type_text', 'cdp_type', 'inspect', 'set_input_files',
 ]);
 
 // --- Legacy CDP real-input fallback helpers (used by tests and extension fallback mode) ---
@@ -390,19 +443,69 @@ async function cdpSend(tabId, method, params = {}) {
   });
 }
 
-async function cdpClick(tabId, x, y, shift = false) {
-  const modifiers = shift ? CDP_MOD_SHIFT : 0;
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
-  return { clicked: true, x, y, shift: !!shift };
+// Resolve a CSS selector to its element's viewport-centre coords via
+// Runtime.evaluate. We're already attached via chrome.debugger here, so
+// this saves the content-script round-trip and works on every cdp_*
+// helper that needs an element target.
+async function cdpResolveSelectorCenter(tid, selector) {
+  const expr = `(() => {
+    const e = document.querySelector(${JSON.stringify(selector)});
+    if (!e) return null;
+    const r = e.getBoundingClientRect();
+    if (r.width < 1 && r.height < 1) return { error: 'element has zero-size bbox' };
+    return { cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+  })()`;
+  const res = await cdpSend(tid, 'Runtime.evaluate', { expression: expr, returnByValue: true });
+  const v = res?.result?.value;
+  if (v == null || res?.result?.subtype === 'null') throw new Error(`No element matches selector: ${selector}`);
+  if (v.error) throw new Error(`selector ${JSON.stringify(selector)}: ${v.error}`);
+  return { cx: v.cx, cy: v.cy };
 }
 
-async function cdpType(tabId, text = '') {
-  for (const ch of String(text)) {
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch });
+async function cdpClick(tabId, x, y, shift = false, selector = null) {
+  const tid = await ensureDebugger(tabId);
+  let cx = x, cy = y;
+  if (selector) {
+    ({ cx, cy } = await cdpResolveSelectorCenter(tid, selector));
+  } else if (typeof cx !== 'number' || typeof cy !== 'number') {
+    throw new Error('cdp_click: provide either selector or x,y coordinates');
   }
-  return { typed: text.length };
+  const modifiers = shift ? CDP_MOD_SHIFT : 0;
+  await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: 1, modifiers });
+  await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: 1, modifiers });
+  const out = { clicked: true, x: cx, y: cy, shift: !!shift };
+  if (selector) out.selector = selector;
+  return out;
+}
+
+async function cdpType(tabId, text = '', selector = null) {
+  const tid = await ensureDebugger(tabId);
+  if (selector) {
+    // Focus the element first so subsequent key events route to it. We
+    // verify activeElement actually moved — some elements refuse focus
+    // (disabled inputs, contenteditable=false, etc.) and silently
+    // dispatching keys against the previous focus would be confusing.
+    const expr = `(() => {
+      const e = document.querySelector(${JSON.stringify(selector)});
+      if (!e) return null;
+      e.focus();
+      return document.activeElement === e;
+    })()`;
+    const res = await cdpSend(tid, 'Runtime.evaluate', { expression: expr, returnByValue: true });
+    if (res?.result?.value == null || res?.result?.subtype === 'null') {
+      throw new Error(`No element matches selector: ${selector}`);
+    }
+    if (res.result.value !== true) {
+      throw new Error(`focus on ${JSON.stringify(selector)} did not take effect (element refused focus?)`);
+    }
+  }
+  for (const ch of String(text)) {
+    await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch });
+    await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch });
+  }
+  const out = { typed: text.length };
+  if (selector) out.selector = selector;
+  return out;
 }
 
 async function cdpKey(tabId, key) {
@@ -422,9 +525,127 @@ async function cdpKey(tabId, key) {
   return { pressed: k };
 }
 
-async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600) {
-  await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY });
-  return { scrolled: true };
+async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600, selector = null) {
+  const tid = await ensureDebugger(tabId);
+  let cx = x, cy = y;
+  if (selector) {
+    // Wheel events dispatch *at* a point and bubble up to the nearest
+    // scrollable ancestor — that's how you scroll inner containers
+    // (dropdowns, virtualised lists) that window.scrollBy can't reach.
+    ({ cx, cy } = await cdpResolveSelectorCenter(tid, selector));
+  }
+  await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: cx, y: cy, deltaX, deltaY });
+  const out = { scrolled: true, x: cx, y: cy };
+  if (selector) out.selector = selector;
+  return out;
+}
+
+// --- File input attachment via CDP DOM.setFileInputFiles ---
+// Works on hidden / display:none / opacity:0 / styled <input type=file>.
+// The selector may target the input directly or a wrapping label/button
+// that contains the input as a descendant — we auto-walk in that case.
+
+async function setInputFiles(tabId, selector, files) {
+  if (!selector || typeof selector !== 'string') throw new Error('selector is required');
+  if (!Array.isArray(files) || files.length === 0) throw new Error('files must be a non-empty array');
+
+  const tid = await ensureDebugger(tabId);
+
+  // Resolve selector → file input element. We accept a wrapper (label,
+  // button, container div) and walk to the nearest descendant
+  // input[type=file]; this is how upload widgets are typically built.
+  const expr = `(() => {
+    let el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return null;
+    if (!(el instanceof HTMLInputElement) || el.type !== 'file') {
+      const inner = el.querySelector && el.querySelector('input[type=file]');
+      if (inner) el = inner;
+    }
+    return el;
+  })()`;
+  const evalRes = await cdpSend(tid, 'Runtime.evaluate', { expression: expr, returnByValue: false });
+  if (!evalRes?.result?.objectId || evalRes.result.subtype === 'null') {
+    throw new Error(`No <input type=file> resolved from selector ${JSON.stringify(selector)}`);
+  }
+  const objectId = evalRes.result.objectId;
+
+  try {
+    // Validate so we return a clear error rather than a cryptic CDP one.
+    const info = await cdpSend(tid, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: 'function() { return { tagName: this.tagName, type: this.type, multiple: !!this.multiple, name: this.name || null }; }',
+      returnByValue: true,
+    });
+    const v = info?.result?.value || {};
+    if (v.tagName !== 'INPUT' || v.type !== 'file') {
+      throw new Error(`Resolved element is <${(v.tagName || '?').toLowerCase()}>${v.type ? ` type=${v.type}` : ''}, not <input type=file>`);
+    }
+    if (!v.multiple && files.length > 1) {
+      throw new Error(`Input is not 'multiple' but ${files.length} files were provided`);
+    }
+
+    await cdpSend(tid, 'DOM.setFileInputFiles', { objectId, files });
+    return { attached: files.length, multiple: !!v.multiple, name: v.name };
+  } finally {
+    // Release the JS handle so the page can GC the reference. Errors
+    // here are non-fatal (object may already be gone).
+    cdpSend(tid, 'Runtime.releaseObject', { objectId }).catch(() => {});
+  }
+}
+
+// --- File chooser interception (Page.setInterceptFileChooserDialog) ---
+// While armed for a given tab, the next native file picker that opens
+// (e.g. from clicking an upload button whose <input type=file> is
+// hidden or dispatched-via-button) is auto-fulfilled with the queued
+// paths. State is per-tab so multiple tabs can be armed independently.
+
+const fileChooserQueue = new Map(); // tabId → string[]
+let fileChooserListenerInstalled = false;
+
+function installFileChooserListener() {
+  if (fileChooserListenerInstalled) return;
+  fileChooserListenerInstalled = true;
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (method !== 'Page.fileChooserOpened') return;
+    const tid = source?.tabId;
+    const files = fileChooserQueue.get(tid);
+    if (!files || !files.length) return;
+    const backendNodeId = params?.backendNodeId;
+    if (!backendNodeId) return;
+    // One-shot: pop the queue so a stale arming doesn't fulfil
+    // unrelated dialogs hours later.
+    fileChooserQueue.delete(tid);
+    chrome.debugger.sendCommand({ tabId: tid }, 'DOM.setFileInputFiles',
+      { backendNodeId, files }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('[turbo] setFileInputFiles (intercept) failed:', chrome.runtime.lastError.message);
+        }
+      });
+  });
+}
+
+async function interceptFileChooser(tabId, enable, files) {
+  const tid = await ensureDebugger(tabId);
+  if (enable) {
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new Error('files must be a non-empty array when enable=true');
+    }
+    installFileChooserListener();
+    // Page domain has to be enabled for fileChooserOpened events to fire.
+    await cdpSend(tid, 'Page.enable');
+    await cdpSend(tid, 'Page.setInterceptFileChooserDialog', { enabled: true });
+    fileChooserQueue.set(tid, files);
+    return {
+      armed: true,
+      tabId: tid,
+      files: files.length,
+      mode: 'one-shot',
+      note: 'Will auto-fulfil the next file-chooser dialog on this tab, then drop the queue. Re-arm with another intercept_file_chooser call for the next upload, or use set_input_files directly if the dialog has already opened.',
+    };
+  }
+  const wasArmed = fileChooserQueue.delete(tid);
+  await cdpSend(tid, 'Page.setInterceptFileChooserDialog', { enabled: false });
+  return { armed: false, tabId: tid, hadPendingFiles: wasArmed };
 }
 
 // --- Screenshot with resize ---
@@ -612,6 +833,15 @@ async function dispatch(action, params) {
       return { tabId: tid, url: params.url };
     }
 
+    case 'page_reload': {
+      // Direct tabs.reload bypasses page CSP entirely — preferred over
+      // dispatching a click on an in-page reload control with a
+      // `javascript:` href, which strict CSPs block.
+      const tid = await resolveTab(params.tabId);
+      await chrome.tabs.reload(tid, { bypassCache: !!params.ignoreCache });
+      return { reloaded: true };
+    }
+
     case 'screenshot': {
       return await screenshot(params.tabId, params.maxWidth, params.quality);
     }
@@ -636,13 +866,19 @@ async function dispatch(action, params) {
 
     // --- CDP real-input commands (extension fallback path) ---
     case 'cdp_click':
-      return await cdpClick(params.tabId, params.x, params.y, params.shift);
+      return await cdpClick(params.tabId, params.x, params.y, params.shift, params.selector);
     case 'cdp_type':
-      return await cdpType(params.tabId, params.text);
+      return await cdpType(params.tabId, params.text, params.selector);
     case 'cdp_key':
       return await cdpKey(params.tabId, params.key);
     case 'cdp_scroll':
-      return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY);
+      return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY, params.selector);
+
+    case 'set_input_files':
+      return await setInputFiles(params.tabId, params.selector, params.files);
+
+    case 'intercept_file_chooser':
+      return await interceptFileChooser(params.tabId, !!params.enable, params.files);
 
     // --- Content-script commands ---
     case 'extract_text':

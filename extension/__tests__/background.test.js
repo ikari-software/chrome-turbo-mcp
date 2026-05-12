@@ -47,8 +47,10 @@ beforeAll(() => {
   const fns = [
     'getStats', 'broadcast', 'logActivity', 'updateBadge',
     'connect', 'scheduleReconnect', 'startKeepalive', 'stopKeepalive',
+    'pingWS', 'handlePong', 'forceReconnect',
     'resolveTab', 'ensureContentScript', 'toContent',
     'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll',
+    'setInputFiles', 'interceptFileChooser',
     'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
     'executeJsMain', 'adaptScript', 'dispatch',
   ].join(', ');
@@ -272,6 +274,44 @@ describe('cdpClick', () => {
 
     await api.cdpClick(1, 50, 50, 8);
   });
+
+  it('resolves selector → element centre before dispatching', async () => {
+    const events = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      if (method === 'Runtime.evaluate') {
+        cb({ result: { value: { cx: 120, cy: 240 } } });
+      } else if (method === 'Input.dispatchMouseEvent') {
+        events.push({ type: params.type, x: params.x, y: params.y });
+        cb();
+      } else {
+        cb({});
+      }
+    });
+    const out = await api.cdpClick(1, undefined, undefined, false, '#submit');
+    expect(events[0]).toEqual({ type: 'mousePressed', x: 120, y: 240 });
+    expect(out).toMatchObject({ clicked: true, x: 120, y: 240, selector: '#submit' });
+  });
+
+  it('throws when selector matches nothing', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { subtype: 'null', value: null } });
+      else cb({});
+    });
+    await expect(api.cdpClick(1, undefined, undefined, false, '#nope')).rejects.toThrow(/No element matches/);
+  });
+
+  it('throws when neither selector nor coords are provided', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb({}));
+    await expect(api.cdpClick(1, undefined, undefined, false)).rejects.toThrow(/selector or x,y/);
+  });
+
+  it('reports zero-size bbox cleanly', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { value: { error: 'element has zero-size bbox' } } });
+      else cb({});
+    });
+    await expect(api.cdpClick(1, undefined, undefined, false, '.hidden')).rejects.toThrow(/zero-size bbox/);
+  });
 });
 
 // ============================================================
@@ -287,6 +327,35 @@ describe('cdpType', () => {
 
     await api.cdpType(1, 'ab');
     expect(events).toEqual(['keyDown', 'keyUp', 'keyDown', 'keyUp']);
+  });
+
+  it('focuses selector before typing', async () => {
+    const calls = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      calls.push({ method, expression: params?.expression });
+      if (method === 'Runtime.evaluate') cb({ result: { value: true } });
+      else cb({});
+    });
+    const out = await api.cdpType(1, 'x', '#email');
+    expect(calls[0].method).toBe('Runtime.evaluate');
+    expect(calls[0].expression).toMatch(/querySelector.*#email/);
+    expect(out).toMatchObject({ typed: 1, selector: '#email' });
+  });
+
+  it('rejects when selector does not focus', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { value: false } });
+      else cb({});
+    });
+    await expect(api.cdpType(1, 'x', '#disabled')).rejects.toThrow(/did not take effect/);
+  });
+
+  it('rejects when selector matches nothing', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { subtype: 'null', value: null } });
+      else cb({});
+    });
+    await expect(api.cdpType(1, 'x', '#missing')).rejects.toThrow(/No element matches/);
   });
 });
 
@@ -321,6 +390,113 @@ describe('cdpScroll', () => {
     });
 
     await api.cdpScroll(1, 600, 400, 0, 300);
+  });
+
+  it('resolves selector → centre and dispatches wheel there', async () => {
+    const calls = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      calls.push({ method, params });
+      if (method === 'Runtime.evaluate') cb({ result: { value: { cx: 200, cy: 600 } } });
+      else cb({});
+    });
+    const out = await api.cdpScroll(1, undefined, undefined, 0, 400, '.dropdown');
+    const wheel = calls.find(c => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseWheel');
+    expect(wheel.params).toMatchObject({ x: 200, y: 600, deltaY: 400 });
+    expect(out).toMatchObject({ scrolled: true, x: 200, y: 600, selector: '.dropdown' });
+  });
+
+  it('rejects when scroll selector matches nothing', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { subtype: 'null', value: null } });
+      else cb({});
+    });
+    await expect(api.cdpScroll(1, undefined, undefined, 0, 100, '#nope')).rejects.toThrow(/No element matches/);
+  });
+});
+
+// ============================================================
+// setInputFiles()
+// ============================================================
+describe('setInputFiles', () => {
+  function wireCdp({ tagName = 'INPUT', type = 'file', multiple = true } = {}) {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _params, cb) => {
+      if (method === 'Runtime.evaluate') {
+        cb({ result: { objectId: 'obj-1', subtype: undefined } });
+      } else if (method === 'Runtime.callFunctionOn') {
+        cb({ result: { value: { tagName, type, multiple, name: 'photos' } } });
+      } else if (method === 'DOM.setFileInputFiles' || method === 'Runtime.releaseObject') {
+        cb({});
+      } else {
+        cb({});
+      }
+    });
+  }
+
+  it('attaches files to a single-file input', async () => {
+    wireCdp({ multiple: false });
+    const r = await api.setInputFiles(1, 'input[type=file]', ['/a.jpg']);
+    expect(r).toEqual({ attached: 1, multiple: false, name: 'photos' });
+  });
+
+  it('attaches multiple files to a multiple input', async () => {
+    wireCdp({ multiple: true });
+    const r = await api.setInputFiles(1, 'input[type=file]', ['/a.jpg', '/b.jpg']);
+    expect(r.attached).toBe(2);
+  });
+
+  it('rejects when input is not multiple but more than one file given', async () => {
+    wireCdp({ multiple: false });
+    await expect(api.setInputFiles(1, '#x', ['/a.jpg', '/b.jpg'])).rejects.toThrow(/not 'multiple'/);
+  });
+
+  it('rejects when resolved element is not an input', async () => {
+    wireCdp({ tagName: 'DIV', type: '' });
+    await expect(api.setInputFiles(1, '#x', ['/a.jpg'])).rejects.toThrow(/not <input type=file>/);
+  });
+
+  it('rejects empty file list before touching CDP', async () => {
+    await expect(api.setInputFiles(1, '#x', [])).rejects.toThrow(/non-empty array/);
+  });
+
+  it('rejects missing selector', async () => {
+    await expect(api.setInputFiles(1, '', ['/a.jpg'])).rejects.toThrow(/selector is required/);
+  });
+
+  it('rejects when selector resolves to nothing', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { subtype: 'null' } });
+      else cb({});
+    });
+    await expect(api.setInputFiles(1, '#missing', ['/a.jpg'])).rejects.toThrow(/No <input type=file> resolved/);
+  });
+});
+
+// ============================================================
+// interceptFileChooser()
+// ============================================================
+describe('interceptFileChooser', () => {
+  it('arms interception with files queued', async () => {
+    const calls = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      calls.push({ method, params });
+      cb({});
+    });
+    const r = await api.interceptFileChooser(2, true, ['/photo.jpg']);
+    expect(r).toMatchObject({ armed: true, tabId: 2, files: 1, mode: 'one-shot' });
+    expect(r.note).toMatch(/one-shot|re-arm|next/i);
+    expect(calls.map(c => c.method)).toContain('Page.setInterceptFileChooserDialog');
+    const setCall = calls.find(c => c.method === 'Page.setInterceptFileChooserDialog');
+    expect(setCall.params).toEqual({ enabled: true });
+  });
+
+  it('disarms interception', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb({}));
+    const r = await api.interceptFileChooser(2, false);
+    expect(r).toMatchObject({ armed: false, tabId: 2 });
+  });
+
+  it('rejects arming without files', async () => {
+    await expect(api.interceptFileChooser(2, true, [])).rejects.toThrow(/non-empty array/);
   });
 });
 
@@ -367,6 +543,35 @@ describe('dispatch', () => {
     expect(result.tabId).toBe(5);
   });
 
+  it('page_reload — soft reload of active tab', async () => {
+    chrome.tabs.query.mockResolvedValue([{ id: 7 }]);
+    const result = await api.dispatch('page_reload', {});
+    expect(chrome.tabs.reload).toHaveBeenCalledWith(7, { bypassCache: false });
+    expect(result).toEqual({ reloaded: true });
+  });
+
+  it('page_reload — hard reload with ignoreCache', async () => {
+    const result = await api.dispatch('page_reload', { tabId: 9, ignoreCache: true });
+    expect(chrome.tabs.reload).toHaveBeenCalledWith(9, { bypassCache: true });
+    expect(result).toEqual({ reloaded: true });
+  });
+
+  it('set_input_files — routes to CDP', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, method, _p, cb) => {
+      if (method === 'Runtime.evaluate') cb({ result: { objectId: 'o' } });
+      else if (method === 'Runtime.callFunctionOn') cb({ result: { value: { tagName: 'INPUT', type: 'file', multiple: true } } });
+      else cb({});
+    });
+    const result = await api.dispatch('set_input_files', { tabId: 1, selector: '#u', files: ['/a.jpg'] });
+    expect(result.attached).toBe(1);
+  });
+
+  it('intercept_file_chooser — arms', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb({}));
+    const result = await api.dispatch('intercept_file_chooser', { tabId: 1, enable: true, files: ['/a.jpg'] });
+    expect(result).toMatchObject({ armed: true, files: 1 });
+  });
+
   it('cdp_click — calls cdpClick', async () => {
     chrome.debugger.attach.mockResolvedValue(undefined);
     chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
@@ -401,7 +606,9 @@ describe('dispatch', () => {
   it('cdp_scroll — scrolls', async () => {
     chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
     const result = await api.dispatch('cdp_scroll', { tabId: 1, deltaY: 100 });
-    expect(result).toEqual({ scrolled: true });
+    expect(result).toMatchObject({ scrolled: true });
+    expect(typeof result.x).toBe('number');
+    expect(typeof result.y).toBe('number');
   });
 
   it('execute_js — runs in MAIN world', async () => {
@@ -491,5 +698,71 @@ describe('keepalive', () => {
   it('stopKeepalive clears the alarm', () => {
     api.stopKeepalive();
     expect(chrome.alarms.clear).toHaveBeenCalledWith('turbo-keepalive');
+  });
+});
+
+// ============================================================
+// pingWS / handlePong / forceReconnect — active WS health check
+// ============================================================
+describe('ping/pong health check', () => {
+  function freshOpenWS() {
+    // Tear down any prior connection so onclose doesn't pollute our mock,
+    // then connect + open a fresh one.
+    const prior = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    if (prior && prior.readyState !== MockWebSocket.CLOSED) prior.close();
+    api.connect();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    ws._open();
+    ws.send.mockClear();
+    ws.close.mockClear();
+    return ws;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sends {type:ping,id} on the open WS', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    const sent = JSON.parse(ws.send.mock.calls[0][0]);
+    expect(sent.type).toBe('ping');
+    expect(sent.id).toMatch(/^__ping_/);
+  });
+
+  it('matching pong cancels the timeout (no force-close)', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    const id = JSON.parse(ws.send.mock.calls[0][0]).id;
+    api.handlePong(id);
+    vi.advanceTimersByTime(5000);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it('no pong → forceReconnect closes the socket and schedules reconnect', () => {
+    const ws = freshOpenWS();
+    chrome.alarms.create.mockClear();
+    api.pingWS();
+    vi.advanceTimersByTime(3500);
+    expect(ws.close).toHaveBeenCalled();
+    expect(chrome.alarms.create).toHaveBeenCalledWith('turbo-reconnect', expect.any(Object));
+  });
+
+  it('synchronous send failure triggers forceReconnect', () => {
+    const ws = freshOpenWS();
+    ws.send.mockImplementation(() => { throw new Error('socket closed'); });
+    api.pingWS();
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it('non-matching pong is a no-op', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    api.handlePong('not-the-id');
+    vi.advanceTimersByTime(3500);
+    expect(ws.close).toHaveBeenCalled(); // timeout still fired
   });
 });

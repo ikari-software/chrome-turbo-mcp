@@ -365,7 +365,17 @@
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.dispatchEvent(new MouseEvent('click', opts));
 
-    return { clicked: sel(el), x: Math.round(cx), y: Math.round(cy) };
+    const out = { clicked: sel(el), x: Math.round(cx), y: Math.round(cy) };
+
+    // Hint when synthetic clicks tend to misfire — most often because the
+    // page uses <a href="javascript:..."> (CSP blocks the navigation) or
+    // guards its handlers on `event.isTrusted`. cdp_click dispatches real
+    // input through chrome.debugger, which produces trusted events.
+    const href = (el.tagName === 'A' || el.tagName === 'AREA') ? el.getAttribute('href') : null;
+    if (href != null && /^\s*javascript:/i.test(href)) {
+      out.hint = 'Target is <a href="javascript:..."> — if this click had no effect, retry with cdp_click (real input, trusted events).';
+    }
+    return out;
   }
 
   // --- Type text ---
@@ -703,18 +713,24 @@
   const overlay = (() => {
     let root = null;
     let cursor = null;
-    let toastEl = null;
+    // Toast stack: newest-first. Each entry { el, shownAt, ended,
+    // position: 'bottom'|'stacked', fadeTimer, maxLifeTimer }. The
+    // current action's toast sits at the bottom; a new action bumps it
+    // up to the "stacked" slot and the previously-stacked one exits.
+    // Each toast lives at least 15s after it appeared; if its action
+    // takes longer, it stays until the result/error event arrives.
+    let toastStack = [];
+    const TOAST_MIN_VISIBLE_MS = 15_000;
+    const TOAST_MAX_LIFE_MS = 60_000;
+    const TOAST_EXIT_MS = 280;
+    const TOAST_STACK_CAP = 2;
     let badge = null;
     let badgeTimer = null;
-    let toastTimer = null;
     let idleFadeTimer = null;
     let cursorPos = { x: window.innerWidth / 2, y: -40 };
     // After this much agent inactivity the cursor and badge fade away so
     // they don't permanently obscure the page.
     const IDLE_FADE_MS = 45_000;
-    // Bottom toast (per-tool intent) lingers 2.5× longer than before so
-    // the user has time to actually read it before it fades.
-    const TOAST_LIFETIME_MS = 7_000;
     // Hard ceiling on how long the badge can stay up if the agent never
     // sends a result/error. Normally the badge fades shortly after the
     // last active task ends (see markTaskEnd).
@@ -747,6 +763,53 @@
     // Tracks the showError's "remove .error class" timer so back-to-back
     // errors don't strip the red shake mid-frame on the second one.
     let errorTimer = null;
+
+    // Element anchor: a real mouse is viewport-fixed, but the agent cursor
+    // represents what the agent is acting on, not where the user is
+    // looking. So we glue the cursor to the target element and reposition
+    // it on scroll/resize until the next action takes over or the
+    // anchored element is detached. offsetX/offsetY preserve the
+    // cursor's original hotspot within the element's bbox (a click on the
+    // centre of a 200px button stays in the centre as the page scrolls,
+    // not at the top-left).
+    let anchor = null;
+    let anchorRAF = 0;
+    let anchorAbort = null;
+
+    function clearAnchor() {
+      if (anchorAbort) { anchorAbort.abort(); anchorAbort = null; }
+      if (anchorRAF) { cancelAnimationFrame(anchorRAF); anchorRAF = 0; }
+      anchor = null;
+    }
+
+    function updateAnchorPosition() {
+      if (!anchor || !cursor) return;
+      if (!anchor.el.isConnected) { clearAnchor(); return; }
+      const r = anchor.el.getBoundingClientRect();
+      const x = r.left + anchor.offsetX;
+      const y = r.top + anchor.offsetY;
+      cursorPos = { x, y };
+      cursor.style.transform = `translate(${x - 4}px, ${y - 4}px)`;
+    }
+
+    function setAnchor(el, x, y) {
+      clearAnchor();
+      if (!el || !el.isConnected) return;
+      const r = el.getBoundingClientRect();
+      anchor = { el, offsetX: x - r.left, offsetY: y - r.top };
+      anchorAbort = new AbortController();
+      const onScroll = () => {
+        if (anchorRAF) return;
+        anchorRAF = requestAnimationFrame(() => {
+          anchorRAF = 0;
+          updateAnchorPosition();
+        });
+      };
+      // capture: true picks up scrolls in any ancestor scroll container,
+      // not just window. passive: true so we don't block scrolling.
+      window.addEventListener('scroll', onScroll, { capture: true, passive: true, signal: anchorAbort.signal });
+      window.addEventListener('resize', onScroll, { passive: true, signal: anchorAbort.signal });
+    }
 
     function robotSVG(size = 14, color = '#d29922') {
       return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
@@ -988,16 +1051,29 @@
           color: #c9d1d9;
           font: 12px/1.3 'SF Mono', Menlo, monospace;
           opacity: 0;
-          /* Short transition so mouse-proximity opacity updates feel
-             responsive; transform transitions still convey the
-             entrance/exit. */
-          transition: opacity 120ms ease, transform 200ms ease;
+          /* Opacity is snappy so mouse-proximity fades feel responsive;
+             transform/bottom are slower so the stack slide-up animation
+             reads as deliberate. */
+          transition: opacity 150ms ease, transform 280ms cubic-bezier(0.2, 0.7, 0.3, 1), bottom 280ms cubic-bezier(0.2, 0.7, 0.3, 1);
           max-width: 80vw;
           backdrop-filter: blur(6px);
           pointer-events: none;
           font-style: italic;
         }
+        /* The --proximity CSS variable is set by the mouse-distance
+           listener (1.0 when the mouse is far, ~0.15 when over the
+           toast). The bottom toast uses it directly; the stacked toast
+           multiplies it by the 0.7 dim. */
         .toast.on { opacity: var(--proximity, 0.95); transform: translateX(-50%) translateY(0); }
+        .toast.stacked {
+          bottom: 70px;
+          opacity: calc(0.7 * var(--proximity, 1));
+          transform: translateX(-50%) translateY(0) scale(0.94);
+        }
+        .toast.exiting {
+          opacity: 0;
+          transform: translateX(-50%) translateY(-12px) scale(0.9);
+        }
         .toast .who { color: #d29922; font-weight: 600; font-style: normal; margin-right: 6px; }
       `;
 
@@ -1019,13 +1095,10 @@
         <div class="robot">${robotSVG(13, '#0d1117')}</div>
       `;
 
-      toastEl = document.createElement('div');
-      toastEl.className = 'toast';
-
+      // Toasts are appended on demand (stack); no singleton DOM node.
       sr.appendChild(style);
       sr.appendChild(badge);
       sr.appendChild(cursor);
-      sr.appendChild(toastEl);
 
       root = sr;
     }
@@ -1158,7 +1231,7 @@
     // happened without reading the popup.
     function actionPalette(action) {
       switch (action) {
-        case 'type_text': case 'cdp_type': case 'cdp_key':
+        case 'type_text': case 'cdp_type': case 'cdp_key': case 'set_input_files':
           return { ring: '#58a6ff', fill: 'rgba(88, 166, 255, 0.55)',  glow: 'rgba(88, 166, 255, 0.55)' };
         case 'scroll': case 'cdp_scroll':
           return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.45)',   glow: 'rgba(63, 185, 80, 0.5)'   };
@@ -1296,6 +1369,10 @@
     // bboxes (find_text, extract_text), placing a loupe at each. Caller
     // is responsible for capping the items list to avoid 30s scans.
     async function scanLoupe(items) {
+      // A prior anchor would yank the cursor back during/after the sweep
+      // on the next scroll; the sweep doesn't have stable elements to
+      // anchor to (loupe positions are raw viewport bboxes).
+      clearAnchor();
       for (const it of items) {
         if (!it || typeof it.x !== 'number') continue;
         const cx = it.x + (it.w || 0) / 2;
@@ -1310,24 +1387,91 @@
 
     function showToast(text, who) {
       ensure();
-      if (!toastEl) return;
-      toastEl.innerHTML = (who ? `<span class="who">${escapeHtml(who)}</span>` : '') + escapeHtml(text);
-      toastEl.classList.add('on');
+      if (!root) return;
+
+      // Promote the current bottom toast to "stacked"; evict anything
+      // already stacked so we never show more than TOAST_STACK_CAP at once.
+      for (const t of toastStack) {
+        if (t.exiting) continue;
+        if (t.position === 'bottom') {
+          t.position = 'stacked';
+          t.el.classList.add('stacked');
+        } else if (t.position === 'stacked') {
+          exitToast(t);
+        }
+      }
+
+      const el = document.createElement('div');
+      el.className = 'toast';
+      el.innerHTML = (who ? `<span class="who">${escapeHtml(who)}</span>` : '') + escapeHtml(text);
+      root.appendChild(el);
+      // Trigger the enter transition next frame so the initial offset
+      // gets painted first.
+      requestAnimationFrame(() => el.classList.add('on'));
+
+      const entry = {
+        el,
+        shownAt: Date.now(),
+        ended: false,
+        exiting: false,
+        position: 'bottom',
+        fadeTimer: 0,
+        // Safety: never let a toast persist forever if its action's
+        // end event is dropped or never fires.
+        maxLifeTimer: setTimeout(() => exitToast(entry), TOAST_MAX_LIFE_MS),
+      };
+      toastStack.unshift(entry);
+      // Each new toast needs its own --proximity seed so it doesn't
+      // pop in at full opacity before the next mousemove tick.
+      el.style.setProperty('--proximity', '0.95');
+
+      while (toastStack.filter(t => !t.exiting).length > TOAST_STACK_CAP) {
+        // Evict the deepest non-exiting toast (oldest).
+        for (let i = toastStack.length - 1; i >= 0; i--) {
+          if (!toastStack[i].exiting) { exitToast(toastStack[i]); break; }
+        }
+      }
+
+      // Arm the proximity listener so the new toast (and the badge)
+      // start fading when the user mouses over them.
       installProximityListener();
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toastEl.classList.remove('on'), TOAST_LIFETIME_MS);
+    }
+
+    function exitToast(t) {
+      if (t.exiting) return;
+      t.exiting = true;
+      clearTimeout(t.fadeTimer);
+      clearTimeout(t.maxLifeTimer);
+      t.el.classList.remove('on', 'stacked');
+      t.el.classList.add('exiting');
+      setTimeout(() => {
+        if (t.el.parentNode) t.el.parentNode.removeChild(t.el);
+        toastStack = toastStack.filter(x => x !== t);
+      }, TOAST_EXIT_MS);
+    }
+
+    // Mark the oldest still-running toast as ended and schedule its
+    // fade-out for whichever is later: 15s after appearance or right now.
+    // Called from showResult/showError; assumes FIFO completion across
+    // overlapping actions, which holds for the common single-agent case.
+    function markToastEnded() {
+      for (let i = toastStack.length - 1; i >= 0; i--) {
+        const t = toastStack[i];
+        if (t.exiting || t.ended) continue;
+        t.ended = true;
+        clearTimeout(t.fadeTimer);
+        const wait = Math.max(0, t.shownAt + TOAST_MIN_VISIBLE_MS - Date.now());
+        t.fadeTimer = setTimeout(() => exitToast(t), wait);
+        return;
+      }
     }
 
     // Mouse-proximity: when the user moves the mouse near (or over) the
-    // badge or the toast, the element fades. Stays opaque when the
-    // mouse is far away (>150px from the nearest edge), goes near-
-    // transparent (0.15) when the mouse is directly on it, and ramps
-    // smoothly between.
-    //
-    // pointer-events: none on the overlay means the elements already
-    // pass clicks/etc. through to the page, so this is purely about
-    // visual access — the user can read whatever is behind the toast
-    // by waving the mouse over it.
+    // badge or any toast in the stack, the element fades. Stays opaque
+    // when the mouse is far (>150px from the nearest edge), goes
+    // near-transparent (0.15) when the mouse is directly on it, and
+    // ramps smoothly between. pointer-events: none means clicks already
+    // pass through — this is purely about visual access.
     function installProximityListener() {
       if (proximityInstalled) return;
       proximityAbortController = new AbortController();
@@ -1342,20 +1486,20 @@
           updateProximityOpacity();
         });
       }, { passive: true, capture: true, signal });
-      // Clean up on pagehide so SPA/extension reloads don't leak
-      // listeners. addEventListener with a signal removes itself when
-      // the controller aborts.
+      // pagehide cleanup so SPA / extension reloads don't leak handlers.
       window.addEventListener('pagehide', () => proximityAbortController?.abort(), { once: true, signal });
       proximityInstalled = true;
     }
     function updateProximityOpacity() {
       // Two-pass: read all bounding rects first, then write all CSS
-      // vars. Avoids forcing a layout flush between the two elements
-      // (would happen if we interleaved read→write→read→write).
+      // vars. Avoids forcing a layout flush between consecutive elements.
       const targets = [];
-      for (const el of [badge, toastEl]) {
-        if (!el || !el.classList.contains('on')) continue;
-        targets.push({ el, rect: el.getBoundingClientRect() });
+      if (badge && badge.classList.contains('on')) {
+        targets.push({ el: badge, rect: badge.getBoundingClientRect() });
+      }
+      for (const t of toastStack) {
+        if (t.exiting) continue;
+        targets.push({ el: t.el, rect: t.el.getBoundingClientRect() });
       }
       for (const { el, rect: r } of targets) {
         const dx = Math.max(0, r.left - mouseX, mouseX - r.right);
@@ -1384,7 +1528,7 @@
           const el = document.querySelector(params.selector);
           if (el) {
             const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r };
+            return { el, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r };
           }
         }
         if (typeof params.x === 'number' && typeof params.y === 'number') {
@@ -1395,20 +1539,42 @@
         const el = document.querySelector(params.selector);
         if (el) {
           const r = el.getBoundingClientRect();
-          return { x: r.left + Math.min(20, r.width / 4), y: r.top + r.height / 2, bbox: r, type: 'type' };
+          return { el, x: r.left + Math.min(20, r.width / 4), y: r.top + r.height / 2, bbox: r, type: 'type' };
         }
       }
       if (action === 'cdp_type' && typeof document.activeElement?.getBoundingClientRect === 'function') {
-        const r = document.activeElement.getBoundingClientRect();
+        const el = document.activeElement;
+        const r = el.getBoundingClientRect();
         if (r.width > 0 && r.height > 0) {
-          return { x: r.left + 14, y: r.top + r.height / 2, bbox: r, type: 'type' };
+          return { el, x: r.left + 14, y: r.top + r.height / 2, bbox: r, type: 'type' };
         }
       }
       if (action === 'inspect' && params.selector) {
         const el = document.querySelector(params.selector);
         if (el) {
           const r = el.getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'inspect' };
+          return { el, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'inspect' };
+        }
+      }
+      if (action === 'set_input_files' && params.selector) {
+        // The real <input type=file> is usually hidden — useless as a
+        // cursor target. Prefer the visible thing the user actually clicks:
+        // the selector as given if it has a non-zero bbox, otherwise the
+        // <label for=id> if one exists.
+        const el = document.querySelector(params.selector);
+        if (el) {
+          let target = el;
+          let r = el.getBoundingClientRect();
+          if ((r.width < 1 || r.height < 1) && el.id) {
+            const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+            if (lbl) {
+              const lr = lbl.getBoundingClientRect();
+              if (lr.width > 0 && lr.height > 0) { target = lbl; r = lr; }
+            }
+          }
+          if (r.width > 0 && r.height > 0) {
+            return { el: target, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'type' };
+          }
         }
       }
       return null;
@@ -1473,10 +1639,16 @@
             flashAt(target.x, target.y, palette);
             if (target.bbox) highlightRect(target.bbox, palette);
           }
+          // Glue the cursor to the element it just acted on so it tracks
+          // on scroll. Bare coord targets (x/y click without a selector)
+          // have no element to follow — drop any previous anchor instead.
+          if (target.el) setAnchor(target.el, target.x, target.y);
+          else clearAnchor();
         } else {
-          // turbo_snapshot also fires its element scan-flash via
-          // showResult once the result comes back; the camera flash up
-          // front is the "agent just photographed the page" beat.
+          // Read-only ops (no DOM target) get their own up-front visual
+          // beat so the user sees the agent doing something. The
+          // result-time visualisation (scan-flash, loupe sweep) is
+          // additive — turbo_snapshot for instance does both.
           switch (READ_ONLY_VISUALS.get(action)) {
             case 'flash': cameraFlash(); break;
             case 'sweep': readSweep();   break;
@@ -1498,6 +1670,9 @@
     // extract_text get a moving loupe sweep, get_interactive_map gets a
     // scan-flash over every interactive element. Anything else is silent.
     async function showResult({ action, result, id }) {
+      // Mark the matching toast as "action ended" so it can begin
+      // its post-action fade after the 15s minimum.
+      markToastEnded();
       try {
         markTaskEnd(id);
         if (!result) return;
@@ -1535,7 +1710,13 @@
         }
         flashAt(cursorPos.x, cursorPos.y, actionPalette('__error'));
         const display = badge?.querySelector('.agent-name')?.textContent || 'agent';
+        // Mark the running intent toast as ended (it'll fade after its
+        // 15s minimum, now sliding up into the stacked slot), push the
+        // error message as the new bottom toast, then mark that one
+        // ended too — the error is itself a terminal state.
+        markToastEnded();
         showToast('✗ ' + (error || 'tool failed'), display);
+        markToastEnded();
       } catch (e) {
         // Visualisation is non-critical.
       } finally {
@@ -1554,6 +1735,7 @@
           cursorPos = { x: window.innerWidth / 2, y: -40 };
         }
         if (badge) badge.classList.remove('on');
+        clearAnchor();
       }, IDLE_FADE_MS);
     }
 

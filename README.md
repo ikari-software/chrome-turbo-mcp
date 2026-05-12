@@ -130,7 +130,41 @@ DOM: `extract_text`, `find_text`, `inspect`, `query_elements`, `get_html`,
 `get_interactive_map`, `describe`, `dom_snapshot`, `get_accessibility_tree`.
 
 Interaction: `click`, `type_text`, `scroll`, `cdp_click`, `cdp_type`,
-`cdp_key`, `cdp_scroll`.
+`cdp_key`, `cdp_scroll`, `set_input_files`, `intercept_file_chooser`.
+
+`click` vs `cdp_click`:
+
+- **`click`** — synthetic DOM events from the content script. Fast, works
+  on most pages. The synthetic click is *untrusted* (`event.isTrusted ===
+  false`) and the activation may not run handlers that gate on trust;
+  when a likely-untrusted case is detected (e.g. `<a href="javascript:..."`)
+  the response carries a `hint` pointing at `cdp_click`.
+- **`cdp_click` / `cdp_type` / `cdp_scroll`** — real browser input
+  dispatched via BiDi/CDP. Trusted events, works through MUI portals,
+  popovers, and `isTrusted` guards. Each accepts either a `selector`
+  (resolved on the page side) or an explicit position; `selector` wins
+  when both are given.
+  - `cdp_click(selector | x,y)` — clicks the element's centre.
+  - `cdp_type(text, [selector])` — types into whatever is focused, or
+    focuses `selector` first (verifies `activeElement` actually moved).
+  - `cdp_scroll(deltaX, deltaY, selector | x,y)` — wheel events
+    dispatched AT a point, bubbling up to the nearest scrollable
+    ancestor — that's how you scroll inner dropdowns / virtualised
+    lists that `window.scrollBy` can't reach.
+
+File uploads come in two flavours:
+
+- **`set_input_files`** — when you can target the `<input type=file>` (or
+  its wrapping label) with a selector. Works on hidden / styled inputs;
+  attaches via CDP `DOM.setFileInputFiles` and fires the `change` event
+  as if a human picked. Paths are resolved on the MCP server host: `~`
+  is expanded, relative paths are rejected, symlinks are realpath'd.
+- **`intercept_file_chooser`** — when the input is dispatched-via-button,
+  cross-frame, or lazy-mounted and you can't grab it directly. Arm with
+  `enable=true` + `files`, click the visible upload control, the next
+  native file picker is auto-fulfilled and the queue is then dropped
+  (one-shot). Re-arm before each additional upload, or disarm with
+  `enable=false`.
 
 JS execution: `execute_js`, `adapt_script`, `add_preload_script`.
 
