@@ -107,7 +107,7 @@ function renderClients(clients) {
 
     const name = document.createElement('span');
     name.className = 'agent-name';
-    name.textContent = c.label || c.client || 'unknown';
+    name.textContent = c.label || 'unknown';
     row.appendChild(name);
 
     if (c.sessionType) {

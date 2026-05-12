@@ -297,14 +297,14 @@ function connect() {
       // read-only tools (find_text → loupe, get_interactive_map → scan
       // flash, etc.). Fire-and-forget; the overlay swallows errors and
       // visualisation is non-critical.
-      notifyOverlay(params.tabId, { kind: 'result', action: msg.action, result });
+      notifyOverlay(params.tabId, { kind: 'result', id: cmdId, action: msg.action, result });
       ws.send(JSON.stringify({ id: msg.id, result }));
     } catch (e) {
       const duration = Math.round(performance.now() - start);
       stats.totalMs += duration;
       stats.errors++;
       // Tell the overlay so the cursor can shake + flash red.
-      notifyOverlay(params.tabId, { kind: 'error', action: msg.action, error: e.message });
+      notifyOverlay(params.tabId, { kind: 'error', id: cmdId, action: msg.action, error: e.message });
       logActivity({
         ...baseEntry,
         status: 'error',

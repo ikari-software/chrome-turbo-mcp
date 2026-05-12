@@ -82,11 +82,48 @@ describe('sel', () => {
     expect(result).toContain('nth-of-type(2)');
   });
 
-  it('stops at an ancestor with id', () => {
+  it('uses id-bearing ancestor when needed for uniqueness', () => {
+    // Two parallel <div><div><span> branches — uniqueness can only be
+    // achieved by anchoring at the #root id. The simple chain
+    // `div>span` matches BOTH spans, so sel() must walk up to #root.
+    document.body.innerHTML = `
+      <div id="root"><div><span>target</span></div></div>
+      <div><div><span>decoy</span></div></div>
+    `;
+    const span = document.querySelector('#root span');
+    const result = api.sel(span);
+    expect(document.querySelectorAll(result).length).toBe(1);
+    expect(document.querySelector(result)).toBe(span);
+    expect(result).toContain('#root');
+  });
+
+  it('returns the shortest unique selector', () => {
+    // Only one span — uniqueness is already achieved at the leaf, so
+    // we don't bother walking up to the id'd ancestor.
     document.body.innerHTML = '<div id="root"><div><span>x</span></div></div>';
     const span = document.querySelector('span');
     const result = api.sel(span);
-    expect(result).toMatch(/^#root>/);
+    expect(document.querySelectorAll(result).length).toBe(1);
+    expect(document.querySelector(result)).toBe(span);
+  });
+
+  it('produces a selector that resolves uniquely on a deep tree', () => {
+    // Regression test for the bug where the old sel() capped at 5
+    // levels and returned non-unique chains like
+    // `div:nth-of-type(3)>div:nth-of-type(2)>...>button`. On a tree
+    // with multiple matching shapes, the agent's querySelector landed
+    // on the FIRST tree-order match — completely the wrong element.
+    document.body.innerHTML = `
+      <div><div><div><div><button>a</button></div></div></div></div>
+      <div><div><div><div><button>b</button></div></div></div></div>
+      <div><div><div><div><button>c</button></div></div></div></div>
+    `;
+    const buttons = document.querySelectorAll('button');
+    for (const btn of buttons) {
+      const result = api.sel(btn);
+      expect(document.querySelectorAll(result).length).toBe(1);
+      expect(document.querySelector(result)).toBe(btn);
+    }
   });
 
   it('handles single child without nth-of-type', () => {
