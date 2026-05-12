@@ -202,10 +202,37 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// broadcastClientsToBrowsers sends the current set of MCP clients to every
-// connected browser extension as an unsolicited push. The extension surfaces
-// this in the popup so the user can see which agents are talking to them.
+// broadcastDebounce coalesces a burst of broadcastClientsToBrowsers() calls
+// into a single push. Fan-out across N relay clients × M browsers can storm
+// when editors flap (CI spawning short-lived MCP processes, the user opening
+// multiple project tabs at once); without debouncing we'd write the entire
+// client list to every browser per event. 100ms is well under human
+// perception and well over the duration of typical register/disconnect
+// bursts.
+var (
+	broadcastTimerMu sync.Mutex
+	broadcastTimer   *time.Timer
+)
+
+const broadcastDebounceWindow = 100 * time.Millisecond
+
+// broadcastClientsToBrowsers schedules a push of the current MCP client set
+// to every connected browser extension, debounced so a burst of calls
+// collapses into one. The extension surfaces this in the popup so the user
+// can see which agents are talking to them. Safe to call from any goroutine.
 func broadcastClientsToBrowsers() {
+	broadcastTimerMu.Lock()
+	defer broadcastTimerMu.Unlock()
+	if broadcastTimer != nil {
+		broadcastTimer.Stop()
+	}
+	broadcastTimer = time.AfterFunc(broadcastDebounceWindow, doBroadcastClientsToBrowsers)
+}
+
+// doBroadcastClientsToBrowsers actually serialises the client list and
+// pushes it to every browser. Called via broadcastTimer; never called
+// directly from outside.
+func doBroadcastClientsToBrowsers() {
 	clients := []map[string]any{}
 
 	relayClientsMu.Lock()
