@@ -235,7 +235,7 @@ func TestSend_NoBrowsers(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with no browsers")
 	}
-	if !strings.Contains(err.Error(), "No browser extensions connected") {
+	if !strings.Contains(err.Error(), "No browser extension connected") {
 		t.Errorf("error = %q", err.Error())
 	}
 }
@@ -617,7 +617,7 @@ func TestRelay_NoBrowsersViaRelay(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with no browsers via relay")
 	}
-	if !strings.Contains(err.Error(), "No browser extensions connected") {
+	if !strings.Contains(err.Error(), "No browser extension connected") {
 		t.Errorf("error = %q", err.Error())
 	}
 }
