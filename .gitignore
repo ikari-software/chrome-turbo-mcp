@@ -2,6 +2,7 @@
 bin/
 dist/
 node_modules/
+node_modules
 *.tsbuildinfo
 
 # Stray top-level binary (built when running `go build` without -o)
