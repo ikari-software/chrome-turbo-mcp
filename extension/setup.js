@@ -38,6 +38,7 @@ globalThis.chrome = {
     query: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
+    reload: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn(),
     captureVisibleTab: vi.fn().mockResolvedValue('data:image/jpeg;base64,AAAA'),
     onActivated: makeEvent(),
@@ -53,6 +54,8 @@ globalThis.chrome = {
     attach: vi.fn().mockResolvedValue(undefined),
     detach: vi.fn().mockResolvedValue(undefined),
     sendCommand: vi.fn(),
+    onEvent: makeEvent(),
+    onDetach: makeEvent(),
   },
   alarms: {
     create: vi.fn(),

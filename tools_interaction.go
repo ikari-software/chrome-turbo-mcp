@@ -47,23 +47,39 @@ func registerInteractionTools(s *server.MCPServer) {
 		passThrough("scroll"),
 	)
 
-	// --- cdp_click (now via BiDi input.performActions) ---
+	// --- cdp_click (real browser input via BiDi/CDP) ---
 	addTool(s,
 		mcp.NewTool("cdp_click",
-			mcp.WithDescription("Click at exact viewport coordinates using real browser input. Works on MUI portals, dropdowns, and any element. Use when regular click tool fails on overlay/popup elements."),
-			mcp.WithNumber("x", mcp.Required(), mcp.Description("X viewport coordinate")),
-			mcp.WithNumber("y", mcp.Required(), mcp.Description("Y viewport coordinate")),
+			mcp.WithDescription(
+				"Click using real browser input (trusted events, bypasses MUI portals, dropdowns, "+
+					"and isTrusted-guarded handlers). Provide ONE of:\n"+
+					"  • selector — the click lands on the element's centre, resolved via "+
+					"getBoundingClientRect on the page side. Preferred when you know the element.\n"+
+					"  • x,y — explicit viewport coordinates. Use when targeting a canvas, "+
+					"an OS-level chrome region, or anywhere a selector doesn't apply.\n"+
+					"If both are given, selector wins. Errors if neither is provided or the "+
+					"selector matches nothing / has zero-size bbox.",
+			),
+			mcp.WithString("selector", mcp.Description("CSS selector. Click lands on the element's centre.")),
+			mcp.WithNumber("x", mcp.Description("X viewport coordinate (required if no selector)")),
+			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (required if no selector)")),
 			mcp.WithBoolean("shift", mcp.Description("Hold Shift key during click (for multi-select)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
 		bidiOrFallback("cdp_click", handleBiDiClick),
 	)
 
-	// --- cdp_type (now via BiDi input.performActions) ---
+	// --- cdp_type (real keyboard input via BiDi/CDP) ---
 	addTool(s,
 		mcp.NewTool("cdp_type",
-			mcp.WithDescription("Type text using real keyboard events. Works with React, MUI, and any framework. Use clear=true to select-all and delete before typing."),
+			mcp.WithDescription(
+				"Type text using real keyboard events. Works with React, MUI, and any framework. "+
+					"By default types into whatever the page has focused — pass selector to focus "+
+					"a specific element first (calls element.focus() on the page and verifies the "+
+					"activeElement actually moved). Use clear=true to select-all and delete before typing.",
+			),
 			mcp.WithString("text", mcp.Required(), mcp.Description("Text to type character by character")),
+			mcp.WithString("selector", mcp.Description("Optional CSS selector — focus this element before typing")),
 			mcp.WithBoolean("clear", mcp.Description("Select-all + delete before typing (default false)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
@@ -80,10 +96,20 @@ func registerInteractionTools(s *server.MCPServer) {
 		bidiOrFallback("cdp_key", handleBiDiKey),
 	)
 
-	// --- cdp_scroll (now via BiDi input.performActions) ---
+	// --- cdp_scroll (real wheel input via BiDi/CDP) ---
 	addTool(s,
 		mcp.NewTool("cdp_scroll",
-			mcp.WithDescription("Scroll at a specific viewport position using real browser wheel events. Provide x,y for position, deltaY for amount (negative=up, positive=down)."),
+			mcp.WithDescription(
+				"Scroll using real browser wheel events. Wheel events dispatch AT a point and "+
+					"bubble up to the nearest scrollable ancestor, so this is how you scroll inner "+
+					"containers (dropdowns, virtualised lists, infinite feeds) that window.scrollBy "+
+					"can't reach. Provide ONE of:\n"+
+					"  • selector — wheel dispatched at the element's centre.\n"+
+					"  • x,y — explicit viewport position (default 600,400).\n"+
+					"deltaY (negative=up, positive=down) controls the scroll amount. If both selector "+
+					"and x,y are given, selector wins.",
+			),
+			mcp.WithString("selector", mcp.Description("CSS selector — wheel events fire at the element's centre")),
 			mcp.WithNumber("x", mcp.Description("X coordinate for scroll position (default 600)")),
 			mcp.WithNumber("y", mcp.Description("Y coordinate for scroll position (default 400)")),
 			mcp.WithNumber("deltaX", mcp.Description("Horizontal scroll amount")),
@@ -114,12 +140,28 @@ func handleBiDiClick(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	x := toFloat(args["x"])
-	y := toFloat(args["y"])
+	var x, y float64
+	sel := toString(args["selector"])
+	if sel != "" {
+		cx, cy, err := resolveSelectorCenter(ctx, ctxID, sel)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		x, y = cx, cy
+	} else if _, hasX := args["x"]; hasX {
+		x = toFloat(args["x"])
+		y = toFloat(args["y"])
+	} else {
+		return mcp.NewToolResultError("cdp_click: provide either selector or x,y coordinates"), nil
+	}
 	if err := bidiClick(ctx, ctxID, x, y, "left"); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return textResult(map[string]any{"clicked": true, "x": x, "y": y})
+	out := map[string]any{"clicked": true, "x": x, "y": y}
+	if sel != "" {
+		out["selector"] = sel
+	}
+	return textResult(out)
 }
 
 func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -127,6 +169,12 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	ctxID, err := resolveContext(args["tabId"])
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	sel := toString(args["selector"])
+	if sel != "" {
+		if err := focusSelector(ctx, ctxID, sel); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 	text := toString(args["text"])
 	if toBool(args["clear"]) {
@@ -137,7 +185,11 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	if err := bidiType(ctx, ctxID, text); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return textResult(map[string]any{"typed": len(text)})
+	out := map[string]any{"typed": len(text)}
+	if sel != "" {
+		out["selector"] = sel
+	}
+	return textResult(out)
 }
 
 func handleBiDiKey(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -159,18 +211,32 @@ func handleBiDiScroll(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	x := toFloat(args["x"])
-	y := toFloat(args["y"])
-	if x == 0 {
-		x = 600
-	}
-	if y == 0 {
-		y = 400
+	var x, y float64
+	sel := toString(args["selector"])
+	if sel != "" {
+		cx, cy, err := resolveSelectorCenter(ctx, ctxID, sel)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		x, y = cx, cy
+	} else {
+		x = toFloat(args["x"])
+		y = toFloat(args["y"])
+		if x == 0 {
+			x = 600
+		}
+		if y == 0 {
+			y = 400
+		}
 	}
 	deltaX := toFloat(args["deltaX"])
 	deltaY := toFloat(args["deltaY"])
 	if err := bidiScroll(ctx, ctxID, x, y, deltaX, deltaY); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return textResult(map[string]any{"scrolled": true})
+	out := map[string]any{"scrolled": true, "x": x, "y": y}
+	if sel != "" {
+		out["selector"] = sel
+	}
+	return textResult(out)
 }
