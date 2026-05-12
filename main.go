@@ -13,10 +13,16 @@ import (
 
 var logger = log.New(os.Stderr, "[turboweb] ", 0)
 
+// serverVersion is advertised to MCP clients and to /version on the
+// daemon. Bumping it on a release lets running MCP instances detect a
+// stale daemon and respawn it instead of routing through the old build.
+const serverVersion = "1.0.0"
+
 func main() {
 	// --ws-server: run as a standalone WebSocket daemon (no MCP stdio).
 	if len(os.Args) > 1 && os.Args[1] == "--ws-server" {
 		logger.Println("Starting as WebSocket daemon")
+		initDaemonInfo()
 		if err := RunDaemon(); err != nil {
 			fmt.Fprintf(os.Stderr, "Daemon error: %v\n", err)
 			os.Exit(1)
@@ -38,7 +44,7 @@ func main() {
 
 	s := server.NewMCPServer(
 		"turboweb",
-		"1.0.0",
+		serverVersion,
 		server.WithToolCapabilities(false),
 		server.WithHooks(hooks),
 		// Surface a top-level instruction the host can fold into the

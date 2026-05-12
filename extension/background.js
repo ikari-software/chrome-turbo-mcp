@@ -118,19 +118,20 @@ function updateBadge(connected) {
 
 // --- MV3 keepalive: prevent service worker from dying ---
 // Service workers get killed after ~30s of inactivity in MV3.
-// chrome.alarms fires every 25s to keep it alive while WS is connected.
+// chrome.alarms fires every 25s to wake us and *actively* probe the WS:
+// readyState can lie as OPEN even after Chrome silently dropped the
+// socket while we were suspended. The only reliable check is a JSON
+// ping with a bounded pong timeout — no pong → force-close → reconnect.
 const KEEPALIVE_ALARM = 'turbo-keepalive';
 const RECONNECT_ALARM = 'turbo-reconnect';
+const PING_TIMEOUT_MS = 3000;
+
+let pingPendingId = null;
+let pingPendingTimer = 0;
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Just being called keeps the SW alive. Also ping WS if connected.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      // WS is healthy, keep the alarm going
-    } else {
-      // WS is dead, reconnect
-      connect();
-    }
+    pingWS();
   }
   if (alarm.name === RECONNECT_ALARM) {
     connect();
@@ -143,6 +144,52 @@ function startKeepalive() {
 
 function stopKeepalive() {
   chrome.alarms.clear(KEEPALIVE_ALARM);
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+}
+
+// pingWS sends `{type:'ping'}` and arms a timer; if no pong arrives in
+// PING_TIMEOUT_MS, the WS is considered zombie and torn down so the
+// onclose handler kicks reconnection. This catches the "MV3 SW slept,
+// Chrome killed the socket, readyState still reads OPEN on wake" case
+// that produces the recurring "MCP isn't seeing a connection" report.
+function pingWS() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    connect();
+    return;
+  }
+  if (pingPendingId) return; // a probe is already in flight
+  pingPendingId = '__ping_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  try {
+    ws.send(JSON.stringify({ type: 'ping', id: pingPendingId }));
+  } catch (e) {
+    // Synchronous send failure is itself a dead-socket signal.
+    forceReconnect('ping send failed: ' + (e?.message || e));
+    return;
+  }
+  pingPendingTimer = setTimeout(() => {
+    forceReconnect('no pong in ' + PING_TIMEOUT_MS + 'ms');
+  }, PING_TIMEOUT_MS);
+}
+
+function handlePong(id) {
+  if (id !== pingPendingId) return;
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+}
+
+function forceReconnect(reason) {
+  console.warn('[turbo] forcing reconnect:', reason);
+  clearTimeout(pingPendingTimer);
+  pingPendingTimer = 0;
+  pingPendingId = null;
+  try { ws?.close(); } catch {}
+  ws = null;
+  updateBadge(false);
+  broadcast({ type: 'status', connected: false });
+  scheduleReconnect();
 }
 
 // --- WebSocket connection with auto-reconnect ---
@@ -169,6 +216,12 @@ function connect() {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) {
       console.warn('[turbo] Malformed WS message:', e.message, event.data?.substring?.(0, 200));
+      return;
+    }
+
+    // Active health-check response from the daemon.
+    if (msg.type === 'pong') {
+      handlePong(msg.id);
       return;
     }
 
