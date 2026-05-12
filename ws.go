@@ -88,9 +88,12 @@ type relayClientInfo struct {
 // --- Daemon mode: runs the WS server as a standalone singleton ---
 
 // RunDaemon starts the WebSocket server in daemon mode.
-// It serves browser extension connections on / and MCP relay connections on /relay.
+// It serves browser extension connections on / (WS), MCP relay
+// connections on /relay (WS), and a /version probe (HTTP JSON) used by
+// MCP instances to detect a stale daemon after a rebuild.
 func RunDaemon() error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/version", handleVersion)
 	mux.HandleFunc("/", handleWSConnection)
 	mux.HandleFunc("/relay", handleRelayConnection)
 
@@ -354,8 +357,32 @@ func connectRelay() {
 		relayConn = nil
 		relayMu.Unlock()
 		conn.Close()
+
+		// Fail every in-flight relay request immediately so callers
+		// don't hang for the 30s tool timeout while we're reconnecting.
+		// Without this, every Claude tool call mid-daemon-restart looks
+		// stuck for 30s and the agent assumes "MCP isn't seeing a
+		// connection" — even though the next call would succeed.
+		failAllPending("relay connection to daemon lost — reconnecting")
+
 		time.Sleep(backoff)
 	}
+}
+
+// failAllPending wakes every pending request with an error. Used when
+// the relay socket dies so callers see the actual failure mode instead
+// of waiting out their per-request timeout.
+func failAllPending(reason string) {
+	pendingMu.Lock()
+	for id, p := range pending {
+		p.timer.Stop()
+		select {
+		case p.errCh <- errors.New(reason):
+		default:
+		}
+		delete(pending, id)
+	}
+	pendingMu.Unlock()
 }
 
 // --- Browser connection handling (daemon only) ---
@@ -391,11 +418,30 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("Extension disconnected (%d browser(s) remaining)", remaining)
 	}()
 
+	// Per-connection write mutex — pong replies race with command writes.
+	var writeMu sync.Mutex
+
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
+
+		// Active health check from the extension service worker. We
+		// reply synchronously so the SW can compare round-trip time
+		// and tear down a zombie WS that Chrome killed silently.
+		var ping struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if json.Unmarshal(message, &ping) == nil && ping.Type == "ping" {
+			pong, _ := json.Marshal(map[string]any{"type": "pong", "id": ping.ID})
+			writeMu.Lock()
+			_ = conn.WriteMessage(websocket.TextMessage, pong)
+			writeMu.Unlock()
+			continue
+		}
+
 		var msg struct {
 			ID     string          `json:"id"`
 			Result json.RawMessage `json:"result,omitempty"`
@@ -566,7 +612,14 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 		}
 	}
 	if len(open) == 0 {
-		return nil, errors.New("No browser extensions connected. Install the extension and ensure a browser is open.")
+		return nil, fmt.Errorf(
+			"No browser extension connected to turboweb daemon on port %d. "+
+				"Troubleshooting: (1) Open Chrome and check chrome://extensions/ — the turboweb extension must be enabled and not crashed. "+
+				"(2) The MV3 service worker may be suspended; opening the extension popup or chrome://extensions/ wakes it. "+
+				"(3) Verify the daemon is alive: `curl http://127.0.0.1:%d/version`. "+
+				"(4) If the daemon was just rebuilt, an in-memory stale daemon may be running — kill it and the next MCP call will spawn a fresh one.",
+			wsPort, wsPort,
+		)
 	}
 
 	// list_tabs: query all browsers, merge results

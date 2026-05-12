@@ -47,6 +47,7 @@ beforeAll(() => {
   const fns = [
     'getStats', 'broadcast', 'logActivity', 'updateBadge',
     'connect', 'scheduleReconnect', 'startKeepalive', 'stopKeepalive',
+    'pingWS', 'handlePong', 'forceReconnect',
     'resolveTab', 'ensureContentScript', 'toContent',
     'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll',
     'setInputFiles', 'interceptFileChooser',
@@ -697,5 +698,71 @@ describe('keepalive', () => {
   it('stopKeepalive clears the alarm', () => {
     api.stopKeepalive();
     expect(chrome.alarms.clear).toHaveBeenCalledWith('turbo-keepalive');
+  });
+});
+
+// ============================================================
+// pingWS / handlePong / forceReconnect — active WS health check
+// ============================================================
+describe('ping/pong health check', () => {
+  function freshOpenWS() {
+    // Tear down any prior connection so onclose doesn't pollute our mock,
+    // then connect + open a fresh one.
+    const prior = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    if (prior && prior.readyState !== MockWebSocket.CLOSED) prior.close();
+    api.connect();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    ws._open();
+    ws.send.mockClear();
+    ws.close.mockClear();
+    return ws;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sends {type:ping,id} on the open WS', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    const sent = JSON.parse(ws.send.mock.calls[0][0]);
+    expect(sent.type).toBe('ping');
+    expect(sent.id).toMatch(/^__ping_/);
+  });
+
+  it('matching pong cancels the timeout (no force-close)', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    const id = JSON.parse(ws.send.mock.calls[0][0]).id;
+    api.handlePong(id);
+    vi.advanceTimersByTime(5000);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it('no pong → forceReconnect closes the socket and schedules reconnect', () => {
+    const ws = freshOpenWS();
+    chrome.alarms.create.mockClear();
+    api.pingWS();
+    vi.advanceTimersByTime(3500);
+    expect(ws.close).toHaveBeenCalled();
+    expect(chrome.alarms.create).toHaveBeenCalledWith('turbo-reconnect', expect.any(Object));
+  });
+
+  it('synchronous send failure triggers forceReconnect', () => {
+    const ws = freshOpenWS();
+    ws.send.mockImplementation(() => { throw new Error('socket closed'); });
+    api.pingWS();
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it('non-matching pong is a no-op', () => {
+    const ws = freshOpenWS();
+    api.pingWS();
+    api.handlePong('not-the-id');
+    vi.advanceTimersByTime(3500);
+    expect(ws.close).toHaveBeenCalled(); // timeout still fired
   });
 });
