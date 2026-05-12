@@ -44,6 +44,7 @@ extension-watch watch:
 # A user can download turboweb-mcp-by-ikari-extension-chrome.zip, unzip it,
 # and load the unpacked folder via chrome://extensions — no Node, no Make.
 extension-zip: extension
+	mkdir -p bin
 	cd extension/dist && rm -f ../../bin/$(BINARY)-extension-chrome.zip ../../bin/$(BINARY)-extension-firefox.zip
 	cd extension/dist && zip -qr ../../bin/$(BINARY)-extension-chrome.zip chrome
 	cd extension/dist && zip -qr ../../bin/$(BINARY)-extension-firefox.zip firefox
