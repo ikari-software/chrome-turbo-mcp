@@ -1,0 +1,57 @@
+name: release
+
+# Fires when a release is published from a v* tag. Builds the cross-
+# platform Go binaries + per-browser extension zips and uploads them
+# as release assets, so the GitHub release stays the canonical artifact
+# source instead of pointing humans at the workflow artifacts tab.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension deps
+        working-directory: extension
+        run: npm ci
+
+      - name: Build everything
+        run: make release
+
+      - name: Inventory
+        run: ls -lh bin/
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          # Per-platform server binary + per-browser extension zip.
+          gh release upload "$tag" \
+            bin/turboweb-mcp-by-ikari-darwin-arm64 \
+            bin/turboweb-mcp-by-ikari-linux-amd64 \
+            bin/turboweb-mcp-by-ikari-windows-amd64.exe \
+            bin/turboweb-mcp-by-ikari-windows-arm64.exe \
+            bin/turboweb-mcp-by-ikari-extension-chrome.zip \
+            bin/turboweb-mcp-by-ikari-extension-firefox.zip \
+            --clobber
