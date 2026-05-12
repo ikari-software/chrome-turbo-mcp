@@ -283,6 +283,108 @@ func bidiEvaluate(ctx context.Context, contextID string, expression string) (jso
 	return raw, nil
 }
 
+// bidiEvaluateJSON runs an expression whose JS-side result is a
+// JSON-stringified value (call JSON.stringify(...) on the page) and
+// decodes that string into target. The BiDi remote-value wire format
+// has a typed envelope per primitive; round-tripping through a string
+// avoids needing to walk that envelope for every shape.
+func bidiEvaluateJSON(ctx context.Context, contextID, expression string, target any) error {
+	raw, err := bidiEvaluate(ctx, contextID, expression)
+	if err != nil {
+		return err
+	}
+	var env struct {
+		Type   string `json:"type"`
+		Result struct {
+			Type  string          `json:"type"`
+			Value json.RawMessage `json:"value"`
+		} `json:"result"`
+		ExceptionDetails *struct {
+			Text string `json:"text"`
+		} `json:"exceptionDetails,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("bidi parse envelope: %v", err)
+	}
+	if env.Type == "exception" || env.ExceptionDetails != nil {
+		msg := "exception"
+		if env.ExceptionDetails != nil {
+			msg = env.ExceptionDetails.Text
+		}
+		return fmt.Errorf("page threw: %s", msg)
+	}
+	if env.Result.Type == "null" {
+		return fmt.Errorf("expression returned null")
+	}
+	if env.Result.Type != "string" {
+		return fmt.Errorf("expected JSON-stringified result, got %s", env.Result.Type)
+	}
+	var raw2 string
+	if err := json.Unmarshal(env.Result.Value, &raw2); err != nil {
+		return fmt.Errorf("bidi parse value: %v", err)
+	}
+	return json.Unmarshal([]byte(raw2), target)
+}
+
+// focusSelector calls element.focus() on the first match and verifies
+// that activeElement actually moved — some elements refuse focus
+// (disabled inputs, tabIndex=-1 containers, contenteditable=false)
+// and silently dispatching keys against the previous focus would be
+// confusing.
+func focusSelector(ctx context.Context, contextID, selector string) error {
+	selJSON, _ := json.Marshal(selector)
+	expr := fmt.Sprintf(
+		`JSON.stringify((()=>{const e=document.querySelector(%s);`+
+			`if(!e)return null;e.focus();`+
+			`return document.activeElement===e;})())`,
+		string(selJSON),
+	)
+	var focused bool
+	if err := bidiEvaluateJSON(ctx, contextID, expr, &focused); err != nil {
+		if err.Error() == "expression returned null" {
+			return fmt.Errorf("no element matches selector %q", selector)
+		}
+		return err
+	}
+	if !focused {
+		return fmt.Errorf("focus on selector %q did not take effect (element refused focus?)", selector)
+	}
+	return nil
+}
+
+// resolveSelectorCenter returns the viewport-space centre coords of the
+// first element matching selector on the given context. Errors when
+// nothing matches or the element has a zero-size bounding rect.
+func resolveSelectorCenter(ctx context.Context, contextID, selector string) (float64, float64, error) {
+	selJSON, _ := json.Marshal(selector)
+	expr := fmt.Sprintf(
+		`JSON.stringify((()=>{const e=document.querySelector(%s);`+
+			`if(!e)return null;const r=e.getBoundingClientRect();`+
+			`if(r.width<1&&r.height<1)return {error:"element has zero-size bbox"};`+
+			`return [r.x+r.width/2, r.y+r.height/2];})())`,
+		string(selJSON),
+	)
+	var raw json.RawMessage
+	if err := bidiEvaluateJSON(ctx, contextID, expr, &raw); err != nil {
+		if err.Error() == "expression returned null" {
+			return 0, 0, fmt.Errorf("no element matches selector %q", selector)
+		}
+		return 0, 0, err
+	}
+	// Either {error: "..."} or [x, y].
+	var errObj struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(raw, &errObj) == nil && errObj.Error != "" {
+		return 0, 0, fmt.Errorf("selector %q: %s", selector, errObj.Error)
+	}
+	var coords [2]float64
+	if err := json.Unmarshal(raw, &coords); err != nil {
+		return 0, 0, fmt.Errorf("selector %q: parse coords: %v", selector, err)
+	}
+	return coords[0], coords[1], nil
+}
+
 func bidiAddPreloadScript(ctx context.Context, script string) (string, error) {
 	c, err := requireBiDi()
 	if err != nil {
