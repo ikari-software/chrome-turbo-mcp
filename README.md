@@ -218,6 +218,19 @@ popup and toast. It's clamped to 200 chars server-side, but treat it as
 the model's claim about what it's doing — verify destructive actions in
 the activity-row params, not just by reading the intent.
 
+**Full threat model in [`SECURITY.md`](SECURITY.md).** Release assets are
+signed via Sigstore — verify with `cosign verify-blob` before running an
+unfamiliar binary; instructions in `SECURITY.md`.
+
+## Licence &amp; trademark
+
+Source is **Apache 2.0** ([`LICENSE`](LICENSE)) — fork it, embed it, ship
+it, re-host it.
+
+The name **TurboWeb MCP**, the **by ikari** attribution, the icon set,
+and the on-page robot-cursor mark are reserved. If you ship a modified
+build, rename it. Full policy in [`TRADEMARK.md`](TRADEMARK.md).
+
 ## Architecture notes
 
 This repo previously had a parallel TypeScript MCP server in `src/` plus
