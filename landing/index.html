@@ -9,6 +9,10 @@
   <link rel="icon" type="image/png" sizes="128x128" href="icons/app-icon-128.png">
   <link rel="icon" type="image/png" sizes="32x32" href="icons/app-icon-128.png">
 
+  <!-- Mobile system UI tint per mode. Browsers pick whichever matches the user's prefers-color-scheme. -->
+  <meta name="theme-color" content="#0a0b10" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f8fd" media="(prefers-color-scheme: light)">
+
   <meta property="og:type" content="website">
   <meta property="og:title" content="TurboWeb MCP — agent-controlled browser">
   <meta property="og:description" content="Chrome / Firefox extension that hands the active tab to a local MCP daemon. Clicks, scrolls, typing, screenshots, OCR — your agent drives the browser you're already in.">
@@ -17,6 +21,10 @@
 
   <style>
     /* --- Design tokens (kept in sync with extension content.js palette) --- */
+    /* Dark is the original mode (orange-dominant glow). Light flips to a
+       blue-leaning palette via prefers-color-scheme below — gives the
+       two modes complementary temperatures so the brand reads at a
+       glance in either. */
     :root {
       --bg: #0a0b10;
       --bg-elev: #0f1117;
@@ -26,27 +34,83 @@
       --fg-dim: #9aa0a8;
       --fg-mute: #6a7280;
       --orange: #d29922;
+      --orange-fg: #d29922;            /* same — for body text on dark, brand value reads fine */
       --orange-soft: rgba(210, 153, 34, 0.16);
       --cyan: #58a6ff;
       --green: #3fb950;
       --purple: #a371f7;
       --red: #f85149;
+      --glow-1: rgba(210, 153, 34, 0.22);  /* primary glow — orange */
+      --glow-2: rgba(88, 166, 255, 0.18);  /* secondary glow — cyan */
+      --hero-shadow: rgba(210, 153, 34, 0.18);
+      --primary-fg: #0a0b10;           /* text inside the orange CTA */
+      --orange-hover: #e0a72b;         /* slightly brighter on hover */
+      /* Semantic surface tints — flip neutral-light vs neutral-dark
+         between the two modes so cards and dividers stay readable. */
+      --surface-tint: rgba(255, 255, 255, 0.02);
+      --surface-tint-strong: rgba(255, 255, 255, 0.04);
+      --divider: rgba(255, 255, 255, 0.04);
+      /* Code blocks stay dark in both modes — universal IDE pattern,
+         and keeps the syntax-highlight tokens fixed regardless of the
+         surrounding theme. */
+      --code-bg: #0d1117;
+      --code-fg: #c9d1d9;
+      --code-keyword: #d29922;
+      --code-string:  #3fb950;
+      --code-comment: #6a7280;
+      --code-value:   #58a6ff;
       --mono: 'SF Mono', 'JetBrains Mono', Menlo, ui-monospace, monospace;
       --sans: -apple-system, 'Inter', Segoe UI, Helvetica Neue, Arial, sans-serif;
     }
 
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f8fd;               /* off-white with a faint blue cast */
+        --bg-elev: #ffffff;          /* cards pop against the tinted bg */
+        --border: rgba(30, 111, 255, 0.18);
+        --border-hover: rgba(30, 111, 255, 0.45);
+        --fg: #0c1730;               /* near-navy, warm */
+        --fg-dim: #4a5872;
+        --fg-mute: #7a8aa3;
+        /* Brand orange darkens for AA contrast on bright bg; the
+           background-fill (CTA) stays the original saturated value. */
+        --orange: #d29922;
+        --orange-fg: #a06e10;
+        --orange-soft: rgba(210, 153, 34, 0.16);
+        --cyan: #1e6fff;             /* deeper blue — readable on white */
+        --green: #1f7a36;
+        --purple: #6534c4;
+        --red: #c33c3c;
+        --glow-1: rgba(30, 111, 255, 0.22);   /* light mode leans blue */
+        --glow-2: rgba(210, 153, 34, 0.10);   /* orange kicker, lower */
+        --hero-shadow: rgba(30, 111, 255, 0.15);
+        --primary-fg: #ffffff;                /* white text on orange CTA on light bg */
+        --orange-hover: #b88512;
+        /* Flip surface tints to neutral-dark so cards have a hairline
+           edge instead of dissolving into white-on-white. */
+        --surface-tint: rgba(15, 23, 42, 0.025);
+        --surface-tint-strong: rgba(15, 23, 42, 0.06);
+        --divider: rgba(15, 23, 42, 0.08);
+      }
+    }
+
     * { box-sizing: border-box; }
+    /* color-scheme tells the UA: native widgets (scrollbars, form
+       controls, focus rings) should follow the same mode. Without it,
+       a light page can get a dark scrollbar — looks broken. */
+    html { color-scheme: dark light; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
     body {
-      /* Subtle dual-glow at top-centre — orange dominant, cyan kicker on the right. */
+      /* Dual-glow at top-centre. Token-driven so light mode flips to
+         a blue-dominant gradient automatically. */
       background:
-        radial-gradient(1100px 540px at 30% -180px, rgba(210, 153, 34, 0.22), transparent 60%),
-        radial-gradient(900px 480px at 78% -120px, rgba(88, 166, 255, 0.18), transparent 60%),
+        radial-gradient(1100px 540px at 30% -180px, var(--glow-1), transparent 60%),
+        radial-gradient(900px 480px at 78% -120px, var(--glow-2), transparent 60%),
         var(--bg);
       min-height: 100vh;
     }
     a { color: var(--fg); text-decoration: none; transition: color 160ms ease; }
-    a:hover { color: var(--orange); }
+    a:hover { color: var(--orange-fg); }
     code, pre { font-family: var(--mono); }
 
     .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
@@ -76,7 +140,7 @@
       line-height: 1.04; letter-spacing: -0.025em; font-weight: 600;
       margin: 0 0 18px;
     }
-    .hero h1 .accent { color: var(--orange); }
+    .hero h1 .accent { color: var(--orange-fg); }
     .hero h1 .accent-2 { color: var(--cyan); }
     .hero .sub {
       font-size: 18px; line-height: 1.55; color: var(--fg-dim);
@@ -87,29 +151,29 @@
       display: inline-flex; align-items: center; gap: 10px;
       padding: 11px 18px; border-radius: 10px;
       font-size: 14px; font-weight: 500; letter-spacing: -0.005em;
-      border: 1px solid var(--border); background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border); background: var(--surface-tint);
       color: var(--fg);
       transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
     }
     .btn:hover { border-color: var(--border-hover); background: var(--orange-soft); color: var(--fg); transform: translateY(-1px); }
-    .btn.primary { background: var(--orange); color: #0a0b10; border-color: var(--orange); font-weight: 600; }
-    .btn.primary:hover { background: #e0a72b; border-color: #e0a72b; color: #0a0b10; }
+    .btn.primary { background: var(--orange); color: var(--primary-fg); border-color: var(--orange); font-weight: 600; }
+    .btn.primary:hover { background: var(--orange-hover); border-color: var(--orange-hover); color: var(--primary-fg); }
     .btn .arrow { transition: transform 160ms ease; }
     .btn:hover .arrow { transform: translateX(2px); }
 
     .hero-art { position: relative; }
     .hero-art img {
       width: 100%; height: auto; display: block;
-      filter: drop-shadow(0 0 40px rgba(210, 153, 34, 0.18));
+      filter: drop-shadow(0 0 40px var(--hero-shadow));
     }
 
     /* --- Section blocks --- */
     section { padding: 56px 0; }
-    section + section { border-top: 1px solid rgba(255,255,255,0.04); }
+    section + section { border-top: 1px solid var(--divider); }
     .section-eyebrow {
       display: inline-block;
       font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--orange); margin-bottom: 12px;
+      color: var(--orange-fg); margin-bottom: 12px;
       padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
     }
     .section-title {
@@ -124,7 +188,7 @@
     }
     .feature {
       padding: 22px; border: 1px solid var(--border); border-radius: 14px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.015), rgba(0,0,0,0)) , rgba(255,255,255,0.01);
+      background: var(--surface-tint);
       transition: border-color 200ms ease, transform 200ms ease, background 200ms ease;
     }
     .feature:hover { border-color: var(--border-hover); transform: translateY(-2px); }
@@ -148,39 +212,39 @@
     .install .col h3 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.005em; }
     pre.code {
       margin: 0; padding: 18px 22px;
-      background: var(--bg-elev); border: 1px solid var(--border);
+      background: var(--code-bg); border: 1px solid var(--border);
       border-radius: 12px; overflow-x: auto;
-      font-size: 12.5px; line-height: 1.65; color: #c9d1d9;
+      font-size: 12.5px; line-height: 1.65; color: var(--code-fg);
     }
-    pre.code .k { color: var(--orange); }
-    pre.code .s { color: var(--green); }
-    pre.code .c { color: var(--fg-mute); font-style: italic; }
-    pre.code .v { color: var(--cyan); }
+    pre.code .k { color: var(--code-keyword); }
+    pre.code .s { color: var(--code-string); }
+    pre.code .c { color: var(--code-comment); font-style: italic; }
+    pre.code .v { color: var(--code-value); }
 
     .step-list { list-style: none; padding: 0; margin: 0; counter-reset: step; }
     .step-list li {
       counter-increment: step;
       padding: 14px 16px 14px 56px; position: relative;
       border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px;
-      background: rgba(255,255,255,0.01);
+      background: var(--surface-tint);
       font-size: 14.5px; line-height: 1.5; color: var(--fg);
     }
     .step-list li::before {
       content: counter(step);
       position: absolute; left: 16px; top: 14px;
       width: 26px; height: 26px; border-radius: 50%;
-      background: var(--orange-soft); color: var(--orange);
+      background: var(--orange-soft); color: var(--orange-fg);
       font-family: var(--mono); font-size: 12px; font-weight: 600;
       display: flex; align-items: center; justify-content: center;
       border: 1px solid var(--border-hover);
     }
-    .step-list code { background: rgba(255,255,255,0.04); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
+    .step-list code { background: var(--surface-tint-strong); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
 
     /* --- Tech strip --- */
     .tech { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
     .tech-item {
       padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px;
-      background: rgba(255,255,255,0.01);
+      background: var(--surface-tint);
     }
     .tech-item .label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-mute); margin-bottom: 6px; }
     .tech-item .value { font-size: 14px; font-weight: 500; color: var(--fg); }
@@ -188,7 +252,7 @@
     /* --- Footer --- */
     footer {
       padding: 36px 0 56px;
-      border-top: 1px solid rgba(255,255,255,0.04);
+      border-top: 1px solid var(--divider);
       display: flex; flex-wrap: wrap; gap: 24px; justify-content: space-between; align-items: center;
       color: var(--fg-mute); font-size: 13px;
     }
@@ -196,7 +260,7 @@
     footer .left img { width: 22px; height: 22px; opacity: 0.85; }
     footer .links { display: flex; gap: 22px; }
     footer .links a { color: var(--fg-mute); }
-    footer .links a:hover { color: var(--orange); }
+    footer .links a:hover { color: var(--orange-fg); }
 
     @media (max-width: 820px) {
       .hero { grid-template-columns: 1fr; gap: 32px; padding: 56px 0 32px; }
@@ -247,7 +311,10 @@
         </div>
       </div>
       <div class="hero-art">
-        <img src="assets/hero-cinematic.png" alt="The TurboWeb cursor with three browser tabs orbiting it">
+        <picture>
+          <source srcset="assets/hero-cinematic-light.png" media="(prefers-color-scheme: light)">
+          <img src="assets/hero-cinematic.png" alt="The TurboWeb cursor with three browser tabs orbiting it">
+        </picture>
       </div>
     </section>
 
