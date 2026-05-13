@@ -388,7 +388,10 @@
   <div class="wrap">
     <nav>
       <a class="brand" href="/">
-        <img src="icons/app-icon-128.png" alt="TurboWeb MCP">
+        <picture>
+          <source srcset="icons/app-icon-light-128.png" media="(prefers-color-scheme: light)">
+          <img src="icons/app-icon-128.png" alt="TurboWeb MCP">
+        </picture>
         <span class="brand-text">
           <span class="name">TurboWeb MCP</span>
           <span class="by">by ikari</span>
@@ -450,55 +453,82 @@
 
       <div class="features">
         <div class="feature">
-          <img src="icons/ai-assist.png" alt="">
+          <picture>
+            <source srcset="icons/ai-assist-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/ai-assist.png" alt="">
+          </picture>
           <h3>AI question-grounding</h3>
           <p>Prefers Claude Haiku on the API; falls back to Chrome's built-in Gemini Nano when no key is set. Either way, every tool result can be filtered through a question.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/multi-agent.png" alt="">
+          <picture>
+            <source srcset="icons/multi-agent-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/multi-agent.png" alt="">
+          </picture>
           <h3>Many agents, one daemon</h3>
           <p>The <code style="font-size:12px">/relay</code> endpoint accepts arbitrary MCP clients. Run Claude Code, Cursor, and Zed at once; the popup attributes every action to its source agent.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/tab-orchestrator.png" alt="">
+          <picture>
+            <source srcset="icons/tab-orchestrator-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/tab-orchestrator.png" alt="">
+          </picture>
           <h3>Cross-browser, in parallel</h3>
           <p>The same daemon drives Chrome, Firefox, and Arc side by side via WebDriver BiDi. <code style="font-size:12px">list_tabs</code> fans out across all of them; every tool accepts a <code style="font-size:12px">tabId</code> to target one specifically.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/screenshot-gallery.png" alt="">
+          <picture>
+            <source srcset="icons/screenshot-gallery-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/screenshot-gallery.png" alt="">
+          </picture>
           <h3>Snapshots &amp; DOM OCR</h3>
           <p>Trimmed page YAML, accessibility tree, interactive element maps, and resized PNG screenshots — all with spatial coordinates the agent can act on.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/network-inspector.png" alt="">
+          <picture>
+            <source srcset="icons/network-inspector-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/network-inspector.png" alt="">
+          </picture>
           <h3>Console &amp; network</h3>
           <p>Tail console logs, capture network traffic, read response bodies, throttle the connection. Inspect what the page is actually doing.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/form-vault.png" alt="">
+          <picture>
+            <source srcset="icons/form-vault-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/form-vault.png" alt="">
+          </picture>
           <h3>File uploads &amp; chooser intercept</h3>
           <p><code style="font-size:12px">set_input_files</code> attaches via CDP even on hidden inputs; <code style="font-size:12px">intercept_file_chooser</code> auto-fulfils native pickers triggered by upload buttons.</p>
           <span class="tag">Shipping</span>
         </div>
         <div class="feature">
-          <img src="icons/workflow-recorder.png" alt="">
+          <picture>
+            <source srcset="icons/workflow-recorder-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/workflow-recorder.png" alt="">
+          </picture>
           <h3>Workflow recorder</h3>
           <p>Record the agent's tool-call timeline, name it, replay later. Custom tools you author with the model are SQLite-backed and persist across sessions.</p>
           <span class="tag future">On the roadmap</span>
         </div>
         <div class="feature">
-          <img src="icons/command-palette.png" alt="">
+          <picture>
+            <source srcset="icons/command-palette-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/command-palette.png" alt="">
+          </picture>
           <h3>Command palette</h3>
           <p>Keyboard launcher for the popup: switch agents, jump tabs, fire a saved tool, all without leaving the page you're on.</p>
           <span class="tag future">On the roadmap</span>
         </div>
         <div class="feature">
-          <img src="icons/visual-diff.png" alt="">
+          <picture>
+            <source srcset="icons/visual-diff-light.png" media="(prefers-color-scheme: light)">
+            <img src="icons/visual-diff.png" alt="">
+          </picture>
           <h3>Visual diff</h3>
           <p>Two snapshots side by side, with the changed regions highlighted. Spot regressions without parsing pixels yourself.</p>
           <span class="tag future">On the roadmap</span>
@@ -570,7 +600,10 @@
   <div class="wrap">
     <footer>
       <div class="left">
-        <img src="icons/app-icon-128.png" alt="">
+        <picture>
+          <source srcset="icons/app-icon-light-128.png" media="(prefers-color-scheme: light)">
+          <img src="icons/app-icon-128.png" alt="">
+        </picture>
         <span>TurboWeb MCP by ikari — Apache 2.0</span>
       </div>
       <div class="links">
