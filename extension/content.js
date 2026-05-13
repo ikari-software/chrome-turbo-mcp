@@ -712,6 +712,7 @@
   // page itself (Shadow DOM, pointer-events: none).
   const overlay = (() => {
     let root = null;
+    let hostEl = null;
     let cursor = null;
     // Toast stack: newest-first. Each entry { el, shownAt, ended,
     // position: 'bottom'|'stacked', fadeTimer, maxLifeTimer }. The
@@ -828,8 +829,13 @@
 
       const host = document.createElement('div');
       host.id = '__turbo_overlay_host';
-      host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
+      // --client-hue: 40 = brand orange. showStart overwrites it per
+      // action from the agent's daemon-assigned hue. Stored on the host
+      // (outside the Shadow DOM) so CSS custom properties inherit
+      // through the shadow boundary into every overlay child.
+      host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;--client-hue:40;';
       (document.body || document.documentElement).appendChild(host);
+      hostEl = host;
 
       const sr = host.attachShadow({ mode: 'closed' });
 
@@ -860,7 +866,8 @@
            directly over the badge it goes near-transparent so the user
            can read the page beneath. */
         .badge.on { opacity: var(--proximity, 0.95); }
-        .badge .agent-name { color: #d29922; font-weight: 600; flex-shrink: 0; }
+        .badge .agent-mark { color: hsl(var(--client-hue, 40), 78%, 48%); display: inline-flex; align-items: center; flex-shrink: 0; transition: color 220ms ease; }
+        .badge .agent-name { color: hsl(var(--client-hue, 40), 78%, 48%); font-weight: 600; flex-shrink: 0; transition: color 220ms ease; }
         .badge .label { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge svg { flex-shrink: 0; }
         .cursor {
@@ -884,11 +891,12 @@
           position: absolute;
           top: -6px; left: 14px;
           width: 14px; height: 14px;
-          background: #d29922;
+          background: hsl(var(--client-hue, 40), 78%, 48%);
           border-radius: 50%;
           display: flex; align-items: center; justify-content: center;
           box-shadow: 0 1px 4px rgba(0,0,0,0.4);
           border: 1.5px solid #0d1117;
+          transition: background 220ms ease;
         }
         .cursor .robot svg { width: 9px; height: 9px; }
         .cursor.click .pointer { animation: clickPulse 350ms ease-out; }
@@ -1074,13 +1082,16 @@
           opacity: 0;
           transform: translateX(-50%) translateY(-12px) scale(0.9);
         }
-        .toast .who { color: #d29922; font-weight: 600; font-style: normal; margin-right: 6px; }
+        .toast .who { color: hsl(var(--client-hue, 40), 78%, 48%); font-weight: 600; font-style: normal; margin-right: 6px; transition: color 220ms ease; }
       `;
 
       badge = document.createElement('div');
       badge.className = 'badge';
+      // The robot SVG uses `currentColor` so it inherits whatever colour
+      // the surrounding context sets. We wrap it in a span whose color is
+      // tied to --client-hue so the whole robot mark flips per agent.
       badge.innerHTML = `
-        ${robotSVG(14, '#d29922')}
+        <span class="agent-mark">${robotSVG(14, 'currentColor')}</span>
         <span class="agent-name">Agent</span>
         <span class="label">idle</span>
       `;
@@ -1618,11 +1629,17 @@
       ['page_reload',         'pulse'],
     ]);
 
-    async function showStart({ action, intent, clientLabel, clientType, params, id }) {
+    async function showStart({ action, intent, clientLabel, clientType, clientHue, params, id }) {
       try {
         // Drop out-of-order delivery: if this id's matching end already
         // arrived, the task isn't actually active.
         if (!id || !recentlyEndedTasks.has(id)) markTaskStart(id);
+        // Apply the agent's hue to the overlay root so cursor, badge,
+        // and toast all flip in lockstep. Defaults to brand orange (40°)
+        // when missing — keeps the single-agent case unchanged.
+        if (hostEl && typeof clientHue === 'number') {
+          hostEl.style.setProperty('--client-hue', String(clientHue));
+        }
         const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
         setBadge({ display, intent: intent || `${action}…` });
         if (intent) showToast(intent, display);

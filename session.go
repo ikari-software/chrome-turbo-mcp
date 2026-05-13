@@ -96,6 +96,7 @@ func snapshotSession() map[string]any {
 		"connectedAt": sessionStartedAt.UnixMilli(),
 		"pid":         os.Getpid(),
 		"ppid":        os.Getppid(),
+		"hue":         brandHue, // single-process mode = single agent = brand
 	}
 }
 

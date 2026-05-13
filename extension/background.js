@@ -238,9 +238,11 @@ function connect() {
     const intent = typeof params._intent === 'string' ? params._intent : '';
     const clientLabel = typeof params._clientLabel === 'string' ? params._clientLabel : '';
     const clientType = typeof params._clientType === 'string' ? params._clientType : '';
+    const clientHue = typeof params._clientHue === 'number' ? params._clientHue : 40;
     delete params._intent;
     delete params._clientLabel;
     delete params._clientType;
+    delete params._clientHue;
 
     const start = performance.now();
     stats.commands++;
@@ -250,6 +252,7 @@ function connect() {
       intent,
       clientLabel,
       clientType,
+      clientHue,
       params: summariseParams(msg.action, params),
     };
     logActivity({ ...baseEntry, status: 'start', timestamp: Date.now() });
@@ -261,6 +264,7 @@ function connect() {
       intent,
       clientLabel,
       clientType,
+      clientHue,
       params,
     });
 

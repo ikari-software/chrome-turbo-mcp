@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -76,14 +77,52 @@ var (
 
 // relayClientInfo tracks metadata for a connected MCP relay client. We
 // only keep what the popup actually renders: label (display), sessionType
-// (chip), pid (debug hint), and connection time. The raw initialize
-// client name/version were never consumed and just bloated the payload.
+// (chip), pid (debug hint), connection time, and the daemon-assigned hue
+// used to colour-code the agent on the popup, cursor, and toast when
+// multiple agents drive the same browser.
 type relayClientInfo struct {
 	conn        *websocket.Conn
 	label       string
 	sessionType string
 	pid         int
 	connectedAt time.Time
+	// hue is a 0–359 degree value assigned by computeClientHues based on
+	// the agent's position in the connectedAt-sorted list. First agent
+	// gets the brand orange hue (40°); each subsequent agent steps by
+	// hueStep° (45°) and wraps modulo 360. Stable as long as the agent
+	// doesn't reconnect — see computeClientHues for the assignment rule.
+	hue int
+}
+
+// brandHue is the canonical orange hue of the project's mark (#d29922
+// ≈ HSL(40°, 78%, 48%)). hueStep is the amount we rotate between
+// consecutive agents — small enough that the family still feels orange-
+// adjacent for the first few agents, large enough that two adjacent
+// agents are visually distinguishable.
+const (
+	brandHue = 40
+	hueStep  = 45
+)
+
+// computeClientHues assigns each relay client a stable hue based on its
+// position in the connectedAt-sorted list. Idempotent; safe to call
+// every time the client set changes. Must be called with relayClientsMu
+// held by the caller.
+func computeClientHues() {
+	type entry struct {
+		info *relayClientInfo
+		at   time.Time
+	}
+	entries := make([]entry, 0, len(relayClients))
+	for _, c := range relayClients {
+		entries = append(entries, entry{info: c, at: c.connectedAt})
+	}
+	// Sort oldest first so the first connected agent keeps the brand
+	// hue and newcomers rotate.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	for i, e := range entries {
+		e.info.hue = ((brandHue + i*hueStep) % 360 + 360) % 360
+	}
 }
 
 // --- Daemon mode: runs the WS server as a standalone singleton ---
@@ -155,8 +194,13 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			info.label = ctrl.Label
 			info.sessionType = ctrl.SessionType
 			info.pid = ctrl.PID
+			// Compute hue inline so the very first command after
+			// register can be tagged correctly — the debounced
+			// broadcastClientsToBrowsers below would otherwise leave
+			// a 100ms window where commands have no hue assignment.
+			computeClientHues()
 			relayClientsMu.Unlock()
-			logger.Printf("Relay client registered: label=%s type=%s pid=%d", ctrl.Label, ctrl.SessionType, ctrl.PID)
+			logger.Printf("Relay client registered: label=%s type=%s pid=%d hue=%d", ctrl.Label, ctrl.SessionType, ctrl.PID, info.hue)
 			broadcastClientsToBrowsers()
 			continue
 		}
@@ -182,6 +226,10 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		if info.sessionType != "" {
 			req.Params["_clientType"] = info.sessionType
 		}
+		// _clientHue lets the extension tint the cursor + toast +
+		// activity-row per agent so a human watching can distinguish
+		// who's driving when multiple agents share a tab.
+		req.Params["_clientHue"] = info.hue
 		relayClientsMu.Unlock()
 
 		go func(reqID, action string, params map[string]any, timeout int) {
@@ -233,6 +281,9 @@ func doBroadcastClientsToBrowsers() {
 	clients := []map[string]any{}
 
 	relayClientsMu.Lock()
+	// Recompute hues on every broadcast so the assignment is always
+	// consistent with the current set (no orphaned hues, no gaps).
+	computeClientHues()
 	for _, c := range relayClients {
 		label := c.label
 		if label == "" {
@@ -242,6 +293,7 @@ func doBroadcastClientsToBrowsers() {
 			"label":       label,
 			"sessionType": c.sessionType,
 			"connectedAt": c.connectedAt.UnixMilli(),
+			"hue":         c.hue,
 		}
 		if c.pid != 0 {
 			entry["pid"] = c.pid
@@ -620,6 +672,11 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 		if lbl := getSessionLabel(); lbl != "" {
 			params["_clientLabel"] = lbl
 		}
+	}
+	// Default hue: brand. In-process mode = single agent = brand orange.
+	// (Relay mode sets _clientHue at the relay handler.)
+	if _, ok := params["_clientHue"]; !ok {
+		params["_clientHue"] = brandHue
 	}
 	open := getOpenBrowsers()
 	if len(open) == 0 {
