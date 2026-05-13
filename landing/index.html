@@ -50,14 +50,13 @@
       --surface-tint: rgba(255, 255, 255, 0.02);
       --surface-tint-strong: rgba(255, 255, 255, 0.04);
       --divider: rgba(255, 255, 255, 0.04);
-      /* Code blocks stay dark in both modes — universal IDE pattern,
-         and keeps the syntax-highlight tokens fixed regardless of the
-         surrounding theme. */
+      /* Code-block tokens — flipped with the surrounding theme in the
+         light-mode override below. */
       --code-bg: #0d1117;
       --code-fg: #c9d1d9;
       --code-keyword: #d29922;
       --code-string:  #3fb950;
-      --code-comment: #6a7280;
+      --code-comment: #8b949e;
       --code-value:   #58a6ff;
       --mono: 'SF Mono', 'JetBrains Mono', Menlo, ui-monospace, monospace;
       --sans: -apple-system, 'Inter', Segoe UI, Helvetica Neue, Arial, sans-serif;
@@ -91,6 +90,15 @@
         --surface-tint: rgba(15, 23, 42, 0.025);
         --surface-tint-strong: rgba(15, 23, 42, 0.06);
         --divider: rgba(15, 23, 42, 0.08);
+        /* Code block flips to a GitHub-light style. Keywords use the
+           darker brand-orange (matches --orange-fg); strings get a
+           forest green; values get a deep blue. */
+        --code-bg: #f6f8fa;
+        --code-fg: #1f2328;
+        --code-keyword: #a06e10;
+        --code-string:  #1f7a36;
+        --code-comment: #6e7781;
+        --code-value:   #0550ae;
       }
     }
 
@@ -146,7 +154,107 @@
       font-size: 18px; line-height: 1.55; color: var(--fg-dim);
       max-width: 540px; margin: 0 0 32px;
     }
-    .hero .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+    .hero .ctas { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+    .hero .ctas-secondary { display: flex; flex-wrap: wrap; gap: 10px; }
+    /* The primary "let your agent install it" CTA is bigger and carries
+       a two-line label so the action (copy a prompt) is unambiguous.
+       position: relative anchors the hover preview tooltip. */
+    .btn.copy-prompt {
+      position: relative;
+      /* The hero image has filter: drop-shadow which establishes its
+         own stacking context. Lift the whole button (and therefore its
+         tooltip child) above that stacking context so the bubble can
+         overlap the hero art when hovered. */
+      z-index: 10;
+      padding: 13px 20px 13px 18px;
+      display: inline-flex; align-items: center; gap: 14px;
+      font-family: var(--sans);
+      cursor: pointer;
+    }
+    .btn.copy-prompt .copy-icon {
+      font-size: 18px; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 50%;
+      background: rgba(255, 255, 255, 0.16);
+    }
+    @media (prefers-color-scheme: light) {
+      .btn.copy-prompt .copy-icon { background: rgba(0, 0, 0, 0.12); }
+    }
+    .btn.copy-prompt .copy-body { display: inline-flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+    .btn.copy-prompt .copy-label { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+    .btn.copy-prompt .copy-help { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.7; font-weight: 500; }
+    .btn.copy-prompt.copied .copy-label { font-weight: 600; }
+    .btn.copy-prompt.copied .copy-help { opacity: 1; }
+
+    /* Hover-preview of the install prompt. Dialogue-bubble style with
+       a small tail pointer on the LEFT edge pointing back at the CTA.
+       Sits to the right of the button on desktop, hidden on narrow
+       viewports. Content gets populated from the button's data-prompt
+       by inline JS — single source of truth so the visible preview and
+       the clipboard payload can't drift. */
+    .btn.copy-prompt .prompt-preview {
+      position: absolute;
+      /* Vertically centre the bubble against the button: top: 50% +
+         translateY(-50%) puts the bubble's middle at the button's
+         middle, so the tail aligns naturally with the button's centre
+         too. translateX is used for the entry animation. */
+      top: 50%;
+      left: calc(100% + 14px);
+      min-width: 627px;
+      max-width: 858px;
+      padding: 14px 16px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.32);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      color: var(--fg-dim);
+      white-space: pre-wrap;
+      text-align: left;
+      letter-spacing: 0.005em;
+      opacity: 0;
+      transform: translate(-4px, -50%);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+      z-index: 5;
+    }
+    .btn.copy-prompt .prompt-preview::before {
+      /* The pointer tail — a rotated square that overlaps the tooltip's
+         left edge so two of its sides become the tail of the bubble.
+         border-left + border-bottom rotated 45° gives a chevron whose
+         tip is at the diamond's left point — pointing at the CTA.
+         top: calc(50% - 6px) puts the rotated square's centre at the
+         bubble's vertical centre (square is 12px tall). */
+      content: "";
+      position: absolute;
+      top: calc(50% - 6px);
+      left: -7px;
+      width: 12px;
+      height: 12px;
+      background: var(--bg-elev);
+      border-left: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      transform: rotate(45deg);
+    }
+    .btn.copy-prompt:hover .prompt-preview,
+    .btn.copy-prompt:focus-visible .prompt-preview {
+      opacity: 1;
+      transform: translate(0, -50%);
+    }
+    /* Hide the preview when the user has just copied — the "Prompt
+       copied" feedback is the more useful signal at that moment. */
+    .btn.copy-prompt.copied:hover .prompt-preview,
+    .btn.copy-prompt.copied:focus-visible .prompt-preview {
+      opacity: 0;
+    }
+    /* On viewports too narrow for the side bubble (or where the hero
+       columns stack), skip it. Tap-only users won't see hover anyway;
+       the button still works. */
+    @media (max-width: 820px) {
+      .btn.copy-prompt .prompt-preview { display: none; }
+    }
     .btn {
       display: inline-flex; align-items: center; gap: 10px;
       padding: 11px 18px; border-radius: 10px;
@@ -304,10 +412,25 @@
           TurboWeb MCP wires <strong>any number of AI agents</strong> to <strong>any number of browsers</strong> you have open — Claude Code, Cursor, anything that speaks MCP, driving Chrome, Firefox, Arc, side by side. Clicks, typing, scrolling, DOM extraction, screenshots, OCR. Cross-browser via WebDriver BiDi. No cloud, no replay shim, no virtual display — it's the browser in front of you.
         </p>
         <div class="ctas">
-          <a class="btn primary" href="https://github.com/ikari-software/turboweb-mcp/releases">
-            Install <span class="arrow">→</span>
-          </a>
-          <a class="btn" href="https://github.com/ikari-software/turboweb-mcp">View on GitHub</a>
+          <button class="btn primary copy-prompt" type="button" data-prompt="Please install TurboWeb MCP by ikari for me.
+
+1. From https://github.com/ikari-software/turboweb-mcp/releases/latest, download the server binary for my OS (darwin-arm64, linux-amd64, windows-amd64.exe, or windows-arm64.exe) and the matching extension zip (chrome or firefox).
+2. Verify SHA256SUMS via `cosign verify-blob` against the repo's release-workflow identity before running anything — instructions are in SECURITY.md on the repo.
+3. Place the binary on $PATH as `turboweb-mcp-by-ikari` and make it executable.
+4. Unpack the extension zip and walk me through loading it at chrome://extensions (Developer mode → Load unpacked) or about:debugging for Firefox.
+5. Update my MCP client config (Claude Code: ~/.claude.json, Cursor: ~/.cursor/mcp.json, etc.) to add a `turboweb-mcp-by-ikari` entry pointing at the binary.
+6. Run a connection check by listing my browser tabs once everything is wired up.">
+            <span class="copy-icon" aria-hidden="true">✨</span>
+            <span class="copy-body">
+              <span class="copy-label">Let your agent install it</span>
+              <span class="copy-help">copy the install prompt</span>
+            </span>
+            <span class="prompt-preview" role="tooltip" aria-hidden="true"></span>
+          </button>
+          <div class="ctas-secondary">
+            <a class="btn" href="https://github.com/ikari-software/turboweb-mcp/releases/latest">Manual install <span class="arrow">→</span></a>
+            <a class="btn" href="https://github.com/ikari-software/turboweb-mcp">View on GitHub</a>
+          </div>
         </div>
       </div>
       <div class="hero-art">
@@ -457,5 +580,43 @@
       </div>
     </footer>
   </div>
+  <script>
+    // "Let your agent install it" — copy the install prompt to the
+    // clipboard, swap the button label to confirm, revert after a beat.
+    // Falls back silently if clipboard API is unavailable (insecure
+    // context, denied permission); the prompt is also right there in
+    // the DOM's data-prompt attribute, so power users can grab it.
+    (() => {
+      const btn = document.querySelector('.copy-prompt');
+      if (!btn) return;
+      const labelEl = btn.querySelector('.copy-label');
+      const helpEl = btn.querySelector('.copy-help');
+      const preview = btn.querySelector('.prompt-preview');
+      // Populate the hover-preview from data-prompt so the visible
+      // bubble and the clipboard payload share a single source.
+      if (preview) preview.textContent = btn.dataset.prompt || '';
+      const original = { label: labelEl.textContent, help: helpEl.textContent };
+      let revertTimer = 0;
+      btn.addEventListener('click', async () => {
+        const prompt = btn.dataset.prompt || '';
+        try {
+          await navigator.clipboard.writeText(prompt);
+          labelEl.textContent = 'Prompt copied';
+          helpEl.textContent = 'paste it into your agent';
+          btn.classList.add('copied');
+        } catch (_) {
+          labelEl.textContent = 'Copy failed';
+          helpEl.textContent = 'select text manually';
+          btn.classList.add('copied');
+        }
+        clearTimeout(revertTimer);
+        revertTimer = setTimeout(() => {
+          labelEl.textContent = original.label;
+          helpEl.textContent = original.help;
+          btn.classList.remove('copied');
+        }, 2800);
+      });
+    })();
+  </script>
 </body>
 </html>
