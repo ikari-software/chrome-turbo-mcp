@@ -99,6 +99,12 @@ function renderClients(clients) {
   for (const c of clients) {
     const row = document.createElement('div');
     row.className = 'client';
+    // Per-agent hue: the daemon assigns each connected agent a stable
+    // hue (brand 40° + 45° per connection-order index). Setting it on
+    // the row lets CSS tint the icon and name in lockstep.
+    if (typeof c.hue === 'number') {
+      row.style.setProperty('--client-hue', String(c.hue));
+    }
 
     const icon = document.createElement('span');
     icon.className = 'agent-icon';
@@ -126,23 +132,17 @@ function renderClients(clients) {
   }
 }
 
-function agentIcon(type) {
-  // A handful of inline SVG icons keyed by sessionType. Fallback is a robot.
-  const colour = {
-    'claude-code': '#d29922',
-    'claude-desktop': '#d29922',
-    'claude': '#d29922',
-    'cursor': '#58a6ff',
-    'vscode': '#58a6ff',
-  }[type] || '#8b949e';
-
-  // Robot head silhouette.
-  return `<svg viewBox="0 0 16 16" fill="none" stroke="${colour}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+function agentIcon(_type) {
+  // Robot head silhouette. Uses currentColor so the inline `--client-hue`
+  // set on the parent .client row tints it per agent. sessionType-keyed
+  // colours used to live here but are now subsumed by the hue scheme —
+  // the .agent-tag chip still flags the editor type explicitly.
+  return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
     <rect x="3" y="5" width="10" height="8" rx="2"/>
     <line x1="8" y1="5" x2="8" y2="3"/>
-    <circle cx="8" cy="2.5" r="0.7" fill="${colour}"/>
-    <circle cx="6" cy="9" r="0.9" fill="${colour}"/>
-    <circle cx="10" cy="9" r="0.9" fill="${colour}"/>
+    <circle cx="8" cy="2.5" r="0.7" fill="currentColor"/>
+    <circle cx="6" cy="9" r="0.9" fill="currentColor"/>
+    <circle cx="10" cy="9" r="0.9" fill="currentColor"/>
   </svg>`;
 }
 
@@ -222,6 +222,11 @@ function buildEntryRow(data) {
   const entry = document.createElement('div');
   entry.className = 'entry' + (data.status === 'start' ? ' running' : '');
   if (data.id) entry.id = 'entry-' + data.id;
+  // Per-action hue so the client-chip and any chip-derived accent inside
+  // this row track the agent that issued the action.
+  if (typeof data.clientHue === 'number') {
+    entry.style.setProperty('--client-hue', String(data.clientHue));
+  }
 
   const time = new Date(data.timestamp || Date.now()).toLocaleTimeString('en-GB', { hour12: false });
   const errCls = data.status === 'error' || data.error ? ' err' : '';

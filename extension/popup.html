@@ -76,8 +76,14 @@
     border-bottom: 1px solid #0d1117;
   }
   .client:last-child { border-bottom: none; }
+  /* Per-agent hue tint: the daemon assigns each connected agent a hue
+     (brand 40° + 45° per connection-order index, modulo 360). The row
+     sets --client-hue inline; the icon (which uses currentColor) and
+     the name both pick it up so the same agent reads with the same
+     tint in the popup, the on-page cursor, and the toast. */
+  .client { color: hsl(var(--client-hue, 40), 78%, 56%); }
   .client .agent-icon { width: 14px; height: 14px; flex-shrink: 0; }
-  .client .agent-name { flex: 1; color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .client .agent-name { flex: 1; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .client .agent-meta { color: #484f58; font-size: 9px; }
   .client .agent-tag {
     background: #21262d; color: #8b949e;
@@ -149,7 +155,8 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .entry .client-chip {
-    background: #21262d; color: #8b949e;
+    background: hsl(var(--client-hue, 40), 28%, 18%);
+    color: hsl(var(--client-hue, 40), 78%, 56%);
     padding: 1px 4px; border-radius: 6px;
     font-size: 8px; flex-shrink: 0;
     max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
