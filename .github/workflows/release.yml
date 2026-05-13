@@ -1,16 +1,21 @@
 name: release
 
 # Fires when a release is published from a v* tag. Builds the cross-
-# platform Go binaries + per-browser extension zips and uploads them
-# as release assets, so the GitHub release stays the canonical artifact
-# source instead of pointing humans at the workflow artifacts tab.
+# platform Go binaries + per-browser extension zips, signs every asset
+# via Sigstore (keyless OIDC — no key material to leak), and uploads
+# everything to the GitHub release.
+#
+# Users verify with `cosign verify-blob` — see SECURITY.md for the
+# exact command. Verification proves the binary came from this repo's
+# release workflow, not a fork or a tampered upload.
 
 on:
   release:
     types: [published]
 
 permissions:
-  contents: write
+  contents: write   # gh release upload
+  id-token: write   # cosign keyless OIDC
 
 jobs:
   build-and-upload:
@@ -31,6 +36,8 @@ jobs:
           cache: npm
           cache-dependency-path: extension/package-lock.json
 
+      - uses: sigstore/cosign-installer@v3
+
       - name: Install extension deps
         working-directory: extension
         run: npm ci
@@ -41,12 +48,37 @@ jobs:
       - name: Inventory
         run: ls -lh bin/
 
+      - name: Generate SHA256SUMS
+        working-directory: bin
+        run: |
+          # One canonical checksum file. Users grab this + its signature
+          # to verify every asset in one cosign call instead of N.
+          sha256sum \
+            turboweb-mcp-by-ikari-darwin-arm64 \
+            turboweb-mcp-by-ikari-linux-amd64 \
+            turboweb-mcp-by-ikari-windows-amd64.exe \
+            turboweb-mcp-by-ikari-windows-arm64.exe \
+            turboweb-mcp-by-ikari-extension-chrome.zip \
+            turboweb-mcp-by-ikari-extension-firefox.zip \
+            > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign SHA256SUMS with cosign (keyless)
+        working-directory: bin
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --bundle SHA256SUMS.cosign.bundle \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.crt \
+            SHA256SUMS
+
       - name: Upload assets to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.event.release.tag_name }}"
-          # Per-platform server binary + per-browser extension zip.
           gh release upload "$tag" \
             bin/turboweb-mcp-by-ikari-darwin-arm64 \
             bin/turboweb-mcp-by-ikari-linux-amd64 \
@@ -54,4 +86,8 @@ jobs:
             bin/turboweb-mcp-by-ikari-windows-arm64.exe \
             bin/turboweb-mcp-by-ikari-extension-chrome.zip \
             bin/turboweb-mcp-by-ikari-extension-firefox.zip \
+            bin/SHA256SUMS \
+            bin/SHA256SUMS.sig \
+            bin/SHA256SUMS.crt \
+            bin/SHA256SUMS.cosign.bundle \
             --clobber
