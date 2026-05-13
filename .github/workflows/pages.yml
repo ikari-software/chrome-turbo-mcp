@@ -1,0 +1,40 @@
+name: pages
+
+# Deploys landing/ to GitHub Pages on every push to master.
+# Uses the modern "GitHub Actions" deployment source (no gh-pages branch).
+#
+# After this lands, enable it in repo Settings → Pages → Source = GitHub Actions.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'landing/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment in flight at a time; new pushes cancel any
+# in-progress run so we never publish stale content.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing
+      - id: deployment
+        uses: actions/deploy-pages@v4
