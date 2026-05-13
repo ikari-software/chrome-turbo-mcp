@@ -1,6 +1,6 @@
 BINARY = turboweb-mcp-by-ikari
 LEGACY_BINARY = chrome-turbo-mcp
-VERSION = 1.1.0
+VERSION = 1.1.1
 
 .PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip watch shim
 

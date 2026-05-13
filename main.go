@@ -16,7 +16,7 @@ var logger = log.New(os.Stderr, "[turboweb] ", 0)
 // serverVersion is advertised to MCP clients and to /version on the
 // daemon. Bumping it on a release lets running MCP instances detect a
 // stale daemon and respawn it instead of routing through the old build.
-const serverVersion = "1.1.0"
+const serverVersion = "1.1.1"
 
 func main() {
 	// --ws-server: run as a standalone WebSocket daemon (no MCP stdio).
@@ -54,18 +54,22 @@ func main() {
 		// overlay rely on this so the human user can follow along
 		// without having to expand each tool-call dump.
 		server.WithInstructions(strings.TrimSpace(`
-TurboWeb MCP drives a real browser tab on the user's screen. EVERY tool call
-MUST include an `+"`intent`"+` argument: one short sentence in natural language
-describing what you are about to do (and ideally why). It is shown live in the
-extension popup and as a toast on the page itself, so the user can follow your
-work without having to expand each tool call. Examples: "Clicking Submit to
-send the form.", "Reading the listing details to find the agent's email.",
-"Scrolling down to look for the contact link." Never omit the intent — leaving
-it blank makes the on-page overlay silent and confuses the user watching.
+TurboWeb MCP drives a real browser tab on the user's screen — a human is
+watching. ⚠️ Every tool call MUST include `+"`intent`"+`: one short sentence
+narrating what you're about to do (shown live as a toast on the page and in
+the extension popup). Without it the overlay goes silent.
+
+⚠️ Prefer user-visible tools — `+"`click` / `type_text` / `scroll`"+` (or
+`+"`cdp_*`"+` when you need trusted events) — over `+"`execute_js`"+`, which
+bypasses the overlay entirely. For reads, prefer `+"`extract_text` / `find_text`"+`
+/ `+"`inspect` / `get_interactive_map`"+` — they animate; raw JS reads don't.
+
+For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 `)),
 	)
 
 	registerAllTools(s)
+	registerPrompts(s)
 
 	logger.Printf("turboweb MCP server running (stdio) — session: %s", getSessionLabel())
 	if err := server.ServeStdio(s); err != nil {
