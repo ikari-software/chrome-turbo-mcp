@@ -5,11 +5,19 @@ VERSION = 1.2.1
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
 # cross-compiled binaries) live in dist/.
+#
+# On macOS we re-sign the binary with an adhoc signature after the link
+# step. Go's own adhoc/linker signature has a tendency to get rejected
+# by amfid (Apple's mobile file integrity daemon) after a `cp` to a
+# different path — exec returns SIGKILL with no stderr. Re-signing in
+# place gives the binary a fresh cdhash amfid accepts.
 build: extension
 	go build -ldflags="-s -w" -o bin/$(BINARY) .
+	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force bin/$(BINARY) >/dev/null 2>&1; fi
 
 install: build
 	cp bin/$(BINARY) /usr/local/bin/
+	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force /usr/local/bin/$(BINARY) >/dev/null 2>&1; fi
 
 # `make release` produces every artifact a GitHub release should ship into
 # dist/:

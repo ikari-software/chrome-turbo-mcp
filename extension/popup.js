@@ -71,9 +71,17 @@ function renderStatus(data) {
   const label = document.getElementById('status-label');
   const browsers = document.getElementById('browsers');
 
+  // "Connected"/"Disconnected" describes the WS between this extension
+  // and the local daemon (ws://127.0.0.1:18321) — not whether any
+  // browser is connected. The previous "No browsers detected" copy was
+  // misleading: it appeared *inside the browser*, sounding like the
+  // daemon couldn't see us, when really the extension just hadn't
+  // reached the daemon yet.
   dot.className = data.connected ? 'dot on pulse' : 'dot';
-  label.textContent = data.connected ? `Connected` : 'Disconnected';
-  browsers.textContent = data.connected ? (data.browsers || '').replace(/,/g, ' • ') : 'No browsers detected';
+  label.textContent = data.connected ? 'Connected' : 'Disconnected';
+  browsers.textContent = data.connected
+    ? 'Linked to daemon · ws://127.0.0.1:18321'
+    : 'Daemon offline — retrying…';
 }
 
 function renderClients(clients) {
