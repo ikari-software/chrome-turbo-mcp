@@ -1,7 +1,8 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.2.1
+VERSION = 1.3.0
+GITHUB_REPO = ikari-software/turboweb-mcp
 
-.PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi watch
+.PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi firefox-updates-json watch
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
 # cross-compiled binaries) live in dist/.
@@ -29,7 +30,7 @@ install: build
 #     still succeeds.
 #
 # Upload with `gh release create vX.Y.Z dist/*`.
-release: extension extension-zip extension-xpi
+release: extension extension-zip extension-xpi firefox-updates-json
 	@mkdir -p dist
 	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/$(BINARY)-darwin-arm64 .
 	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/$(BINARY)-linux-amd64 .
@@ -66,14 +67,33 @@ extension-xpi: extension
 		echo "extension-xpi: skipping (WEB_EXT_API_KEY / WEB_EXT_API_SECRET not set)"; \
 	else \
 		mkdir -p dist && \
-		cd extension && npx --no-install web-ext sign \
+		rm -f "dist/$(BINARY)-extension-firefox-$(VERSION).xpi" && \
+		(cd extension && npx --no-install web-ext sign \
 			--source-dir=dist/firefox \
 			--artifacts-dir=../dist \
-			--filename="$(BINARY)-extension-firefox-$(VERSION).xpi" \
 			--channel="$${WEB_EXT_CHANNEL:-unlisted}" \
 			--api-key="$$WEB_EXT_API_KEY" \
-			--api-secret="$$WEB_EXT_API_SECRET"; \
+			--api-secret="$$WEB_EXT_API_SECRET") && \
+		find dist -maxdepth 1 -name "*-$(VERSION).xpi" \
+			-not -name "$(BINARY)-extension-firefox-*" \
+			-exec mv {} "dist/$(BINARY)-extension-firefox-$(VERSION).xpi" \; ; \
 	fi
+
+# Generate dist/firefox-updates.json from the freshly signed XPI. Firefox
+# polls this file (served at releases/latest/download/firefox-updates.json
+# by GitHub) and auto-installs newer versions. Skipped silently when there's
+# no signed XPI (e.g. local `make release` without AMO creds).
+firefox-updates-json: extension-xpi
+	@xpi="dist/$(BINARY)-extension-firefox-$(VERSION).xpi"; \
+	if [ ! -f "$$xpi" ]; then \
+		echo "firefox-updates-json: skipping (no signed XPI at $$xpi)"; \
+		exit 0; \
+	fi; \
+	hash=$$(shasum -a 256 "$$xpi" | awk '{print $$1}'); \
+	url="https://github.com/$(GITHUB_REPO)/releases/download/v$(VERSION)/$(BINARY)-extension-firefox-$(VERSION).xpi"; \
+	printf '{\n  "addons": {\n    "turboweb-mcp@ikari.pl": {\n      "updates": [\n        { "version": "%s", "update_link": "%s", "update_hash": "sha256:%s" }\n      ]\n    }\n  }\n}\n' \
+	  "$(VERSION)" "$$url" "$$hash" > dist/firefox-updates.json; \
+	echo "firefox-updates-json: dist/firefox-updates.json -> $$url"
 
 test: test-go test-extension
 

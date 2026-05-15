@@ -59,16 +59,17 @@ Release matrix:
 | Chrome extension    | `dist/turboweb-mcp-by-ikari-extension-chrome.zip`  |
 | Firefox add-on      | `dist/turboweb-mcp-by-ikari-extension-firefox.zip` |
 | Firefox signed XPI  | `dist/turboweb-mcp-by-ikari-extension-firefox-VERSION.xpi` (only when AMO creds are set — see below) |
+| Firefox update feed | `dist/firefox-updates.json` (paired with the signed XPI — see auto-update below) |
 
 ### Firefox XPI signing
 
-`make release` will produce an AMO-signed `.xpi` (installable on stock
+`make release` produces an AMO-signed `.xpi` (installable on stock
 Firefox) when both env vars are set:
 
 ```bash
 export WEB_EXT_API_KEY=user:xxxx:yy
 export WEB_EXT_API_SECRET=<hex>
-make release                            # → bin/*.xpi (channel=unlisted)
+make release                            # → dist/*.xpi (channel=unlisted)
 WEB_EXT_CHANNEL=listed make release     # submit to AMO public listing
 ```
 
@@ -77,6 +78,33 @@ Credentials are issued at
 them, `make extension-xpi` (and therefore `make release`) prints a skip
 notice and exits 0 — local builds still succeed, the unsigned firefox
 `.zip` is always produced.
+
+### Firefox auto-update
+
+The signed manifest carries `browser_specific_settings.gecko.update_url`
+pointing at
+<https://github.com/ikari-software/turboweb-mcp/releases/latest/download/firefox-updates.json>.
+Firefox polls this JSON daily; when its `version` is newer than the
+installed XPI, Firefox downloads the linked `.xpi` and replaces the
+extension in place.
+
+The release workflow:
+
+```bash
+make release                            # builds + signs + emits firefox-updates.json
+git tag v$(make -s print-VERSION)       # or `git tag v1.3.0` manually
+git push --tags
+gh release create v1.3.0 dist/*         # uploads xpi + updates.json + binaries
+```
+
+Once the GitHub release is published, the `releases/latest/download/`
+URL resolves to the newly uploaded `firefox-updates.json`, and every
+installed extension picks up the new version within ~24h. To force a
+check sooner: `about:addons` → gear → **Check for updates**.
+
+Note: `update_url` is part of the *signed* manifest, so a one-time
+manual reinstall is required to migrate users from any pre-1.3.0 XPI
+(which has no `update_url`) onto the auto-update channel.
 
 ## Install
 

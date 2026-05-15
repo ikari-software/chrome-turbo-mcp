@@ -156,11 +156,16 @@ describe('renderStatus', () => {
     expect(label.textContent).toBe('Disconnected');
   });
 
-  it('displays browser list', () => {
-    api.renderStatus({ connected: true, browsers: 'Chrome,Firefox' });
+  it('shows daemon endpoint when connected', () => {
+    api.renderStatus({ connected: true });
     const browsers = document.getElementById('browsers');
-    expect(browsers.textContent).toContain('Chrome');
-    expect(browsers.textContent).toContain('Firefox');
+    expect(browsers.textContent).toContain('ws://127.0.0.1:18321');
+  });
+
+  it('shows daemon-offline message when disconnected', () => {
+    api.renderStatus({ connected: false });
+    const browsers = document.getElementById('browsers');
+    expect(browsers.textContent).toMatch(/offline|retrying/i);
   });
 });
 
