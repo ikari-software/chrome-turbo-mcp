@@ -61,6 +61,7 @@ extension-xpi: extension
 		cd extension && npx --no-install web-ext sign \
 			--source-dir=dist/firefox \
 			--artifacts-dir=../dist \
+			--filename="$(BINARY)-extension-firefox-$(VERSION).xpi" \
 			--channel="$${WEB_EXT_CHANNEL:-unlisted}" \
 			--api-key="$$WEB_EXT_API_KEY" \
 			--api-secret="$$WEB_EXT_API_SECRET"; \

@@ -58,7 +58,7 @@ Release matrix:
 | Windows arm64       | `dist/turboweb-mcp-by-ikari-windows-arm64.exe`     |
 | Chrome extension    | `dist/turboweb-mcp-by-ikari-extension-chrome.zip`  |
 | Firefox add-on      | `dist/turboweb-mcp-by-ikari-extension-firefox.zip` |
-| Firefox signed XPI  | `dist/turboweb_mcp_by_ikari-*.xpi` (only when AMO creds are set — see below) |
+| Firefox signed XPI  | `dist/turboweb-mcp-by-ikari-extension-firefox-VERSION.xpi` (only when AMO creds are set — see below) |
 
 ### Firefox XPI signing
 

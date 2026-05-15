@@ -54,7 +54,7 @@ function build() {
       // Add gecko settings
       m.browser_specific_settings = {
         gecko: {
-          id: 'turboweb-mcp@ikari.local',
+          id: 'turboweb-mcp@ikari.pl',
           strict_min_version: '128.0',
         },
       };
@@ -62,6 +62,19 @@ function build() {
       // since the extension is browser-agnostic.
       m.name = 'TurboWeb MCP by ikari';
       m.action.default_title = 'TurboWeb MCP by ikari';
+      // Explicit CSP: under its default extension policy Firefox upgrades
+      // ws://127.0.0.1 → wss:// for extension pages, which the local daemon
+      // (plain ws://, no TLS) can't answer — the connection just fails.
+      // Declaring our own extension_pages CSP replaces that default (no
+      // implicit upgrade) and whitelists the loopback endpoints the
+      // background script actually talks to: the daemon WS (:18321) and
+      // the native screenshot resizer (:18322). Chrome doesn't upgrade
+      // loopback, so this is Firefox-only.
+      m.content_security_policy = {
+        extension_pages:
+          "script-src 'self'; object-src 'self'; " +
+          "connect-src 'self' ws://127.0.0.1:18321 ws://localhost:18321 http://127.0.0.1:18322",
+      };
     }
 
     fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(m, null, 2) + '\n');
