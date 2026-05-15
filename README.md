@@ -39,22 +39,41 @@ extension at all.
 ## Build
 
 ```bash
-make build            # → bin/turboweb-mcp-by-ikari (+ legacy shim)
-make release          # cross-compile + extension zips
+make build            # → bin/turboweb-mcp-by-ikari
+make release          # cross-compile + extension zips (+ signed .xpi if creds set)
 make test             # go tests + extension vitest suite
 make watch            # rebuild extension/dist on every source change
 ```
 
 Release matrix:
 
-| Target           | File                                              |
-| ---------------- | ------------------------------------------------- |
-| macOS arm64      | `bin/turboweb-mcp-by-ikari-darwin-arm64`          |
-| Linux x86-64     | `bin/turboweb-mcp-by-ikari-linux-amd64`           |
-| Windows x86-64   | `bin/turboweb-mcp-by-ikari-windows-amd64.exe`     |
-| Windows arm64    | `bin/turboweb-mcp-by-ikari-windows-arm64.exe`     |
-| Chrome extension | `bin/turboweb-mcp-by-ikari-extension-chrome.zip`  |
-| Firefox add-on   | `bin/turboweb-mcp-by-ikari-extension-firefox.zip` |
+| Target              | File                                              |
+| ------------------- | ------------------------------------------------- |
+| macOS arm64         | `bin/turboweb-mcp-by-ikari-darwin-arm64`          |
+| Linux x86-64        | `bin/turboweb-mcp-by-ikari-linux-amd64`           |
+| Windows x86-64      | `bin/turboweb-mcp-by-ikari-windows-amd64.exe`     |
+| Windows arm64       | `bin/turboweb-mcp-by-ikari-windows-arm64.exe`     |
+| Chrome extension    | `bin/turboweb-mcp-by-ikari-extension-chrome.zip`  |
+| Firefox add-on      | `bin/turboweb-mcp-by-ikari-extension-firefox.zip` |
+| Firefox signed XPI  | `bin/turboweb_mcp_by_ikari-*.xpi` (only when AMO creds are set — see below) |
+
+### Firefox XPI signing
+
+`make release` will produce an AMO-signed `.xpi` (installable on stock
+Firefox) when both env vars are set:
+
+```bash
+export WEB_EXT_API_KEY=user:xxxx:yy
+export WEB_EXT_API_SECRET=<hex>
+make release                            # → bin/*.xpi (channel=unlisted)
+WEB_EXT_CHANNEL=listed make release     # submit to AMO public listing
+```
+
+Credentials are issued at
+<https://addons.mozilla.org/en-US/developers/addon/api/key/>. Without
+them, `make extension-xpi` (and therefore `make release`) prints a skip
+notice and exits 0 — local builds still succeed, the unsigned firefox
+`.zip` is always produced.
 
 ## Install
 
@@ -79,18 +98,6 @@ Wire it into your MCP host (e.g. `~/.claude.json`):
   }
 }
 ```
-
-### Upgrading from `chrome-turbo-mcp`
-
-The project was renamed. To make the upgrade frictionless:
-
-- `make build` ships a `bin/chrome-turbo-mcp` shim that just `exec`s the
-  renamed binary, so existing `~/.claude.json` configs pointing at the
-  old path keep working without edits.
-- On first start, the custom-tool SQLite DB at
-  `~/.config/chrome-turbo-mcp/chrome-turbo.db` is copied forward to
-  `~/.config/turboweb-mcp-by-ikari/turboweb.db` non-destructively (old
-  file stays put so you can roll back).
 
 ## Environment variables
 
@@ -241,5 +248,4 @@ proper daemon-relay mode. See the `Consolidate on Go` commit for the
 rationale.
 
 The project was renamed from `chrome-turbo-mcp` to `turboweb-mcp-by-ikari`
-once the BiDi path made it genuinely cross-browser; a back-compat shim
-and DB migration handle the transition.
+once the BiDi path made it genuinely cross-browser.
