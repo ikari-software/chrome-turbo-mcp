@@ -3,25 +3,30 @@ VERSION = 1.2.0
 
 .PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi watch
 
+# Local dev binary lives in bin/. Release archives (zips, signed .xpi,
+# cross-compiled binaries) live in dist/.
 build: extension
 	go build -ldflags="-s -w" -o bin/$(BINARY) .
 
 install: build
 	cp bin/$(BINARY) /usr/local/bin/
 
-# `make release` produces every artifact a GitHub release should ship:
-#   - cross-compiled binaries for darwin/linux/windows
-#   - extension/dist/{chrome,firefox} zipped so users can install without a
-#     local Node toolchain. The zips live in bin/ so a release uploader (e.g.
-#     `gh release create … bin/*`) picks them up automatically.
-#   - bin/turboweb-mcp-by-ikari-extension-firefox.xpi (AMO-signed) when
-#     WEB_EXT_API_KEY / WEB_EXT_API_SECRET are set; skipped otherwise so a
-#     local `make release` without credentials still succeeds.
+# `make release` produces every artifact a GitHub release should ship into
+# dist/:
+#   - cross-compiled Go binaries for darwin/linux/windows
+#   - extension/dist/{chrome,firefox} zipped (self-contained installs that
+#     don't need a local Node toolchain)
+#   - dist/*.xpi (AMO-signed) when WEB_EXT_API_KEY / WEB_EXT_API_SECRET are
+#     set; skipped otherwise so a local `make release` without credentials
+#     still succeeds.
+#
+# Upload with `gh release create vX.Y.Z dist/*`.
 release: extension extension-zip extension-xpi
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o bin/$(BINARY)-darwin-arm64 .
-	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o bin/$(BINARY)-linux-amd64 .
-	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/$(BINARY)-windows-amd64.exe .
-	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o bin/$(BINARY)-windows-arm64.exe .
+	@mkdir -p dist
+	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/$(BINARY)-darwin-arm64 .
+	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/$(BINARY)-linux-amd64 .
+	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/$(BINARY)-windows-amd64.exe .
+	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/$(BINARY)-windows-arm64.exe .
 
 # One-shot rebuild of the loadable extension into extension/dist/{chrome,firefox}/.
 extension:
@@ -37,10 +42,10 @@ extension-watch watch:
 # A user can download turboweb-mcp-by-ikari-extension-chrome.zip, unzip it,
 # and load the unpacked folder via chrome://extensions — no Node, no Make.
 extension-zip: extension
-	mkdir -p bin
-	cd extension/dist && rm -f ../../bin/$(BINARY)-extension-chrome.zip ../../bin/$(BINARY)-extension-firefox.zip
-	cd extension/dist && zip -qr ../../bin/$(BINARY)-extension-chrome.zip chrome
-	cd extension/dist && zip -qr ../../bin/$(BINARY)-extension-firefox.zip firefox
+	mkdir -p dist
+	cd extension/dist && rm -f ../../dist/$(BINARY)-extension-chrome.zip ../../dist/$(BINARY)-extension-firefox.zip
+	cd extension/dist && zip -qr ../../dist/$(BINARY)-extension-chrome.zip chrome
+	cd extension/dist && zip -qr ../../dist/$(BINARY)-extension-firefox.zip firefox
 
 # Produce an AMO-signed .xpi from extension/dist/firefox/ via web-ext sign.
 # Requires WEB_EXT_API_KEY and WEB_EXT_API_SECRET from
@@ -52,10 +57,10 @@ extension-xpi: extension
 	@if [ -z "$$WEB_EXT_API_KEY" ] || [ -z "$$WEB_EXT_API_SECRET" ]; then \
 		echo "extension-xpi: skipping (WEB_EXT_API_KEY / WEB_EXT_API_SECRET not set)"; \
 	else \
-		mkdir -p bin && \
+		mkdir -p dist && \
 		cd extension && npx --no-install web-ext sign \
 			--source-dir=dist/firefox \
-			--artifacts-dir=../bin \
+			--artifacts-dir=../dist \
 			--channel="$${WEB_EXT_CHANNEL:-unlisted}" \
 			--api-key="$$WEB_EXT_API_KEY" \
 			--api-secret="$$WEB_EXT_API_SECRET"; \
@@ -70,4 +75,4 @@ test-extension:
 	cd extension && npm test
 
 clean:
-	rm -rf bin/$(BINARY)* extension/coverage extension/dist
+	rm -rf bin/$(BINARY)* dist extension/coverage extension/dist

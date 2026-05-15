@@ -45,17 +45,20 @@ make test             # go tests + extension vitest suite
 make watch            # rebuild extension/dist on every source change
 ```
 
+Layout: `bin/` holds the local dev binary; `dist/` holds release archives
+(everything you'd upload with `gh release create vX.Y.Z dist/*`).
+
 Release matrix:
 
-| Target              | File                                              |
-| ------------------- | ------------------------------------------------- |
-| macOS arm64         | `bin/turboweb-mcp-by-ikari-darwin-arm64`          |
-| Linux x86-64        | `bin/turboweb-mcp-by-ikari-linux-amd64`           |
-| Windows x86-64      | `bin/turboweb-mcp-by-ikari-windows-amd64.exe`     |
-| Windows arm64       | `bin/turboweb-mcp-by-ikari-windows-arm64.exe`     |
-| Chrome extension    | `bin/turboweb-mcp-by-ikari-extension-chrome.zip`  |
-| Firefox add-on      | `bin/turboweb-mcp-by-ikari-extension-firefox.zip` |
-| Firefox signed XPI  | `bin/turboweb_mcp_by_ikari-*.xpi` (only when AMO creds are set — see below) |
+| Target              | File                                               |
+| ------------------- | -------------------------------------------------- |
+| macOS arm64         | `dist/turboweb-mcp-by-ikari-darwin-arm64`          |
+| Linux x86-64        | `dist/turboweb-mcp-by-ikari-linux-amd64`           |
+| Windows x86-64      | `dist/turboweb-mcp-by-ikari-windows-amd64.exe`     |
+| Windows arm64       | `dist/turboweb-mcp-by-ikari-windows-arm64.exe`     |
+| Chrome extension    | `dist/turboweb-mcp-by-ikari-extension-chrome.zip`  |
+| Firefox add-on      | `dist/turboweb-mcp-by-ikari-extension-firefox.zip` |
+| Firefox signed XPI  | `dist/turboweb_mcp_by_ikari-*.xpi` (only when AMO creds are set — see below) |
 
 ### Firefox XPI signing
 
