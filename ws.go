@@ -52,6 +52,7 @@ var (
 				"http://127.0.0.1", "http://localhost",
 				"https://127.0.0.1", "https://localhost",
 				"chrome-extension://",
+				"moz-extension://",
 			} {
 				if len(origin) >= len(allowed) && origin[:len(allowed)] == allowed {
 					return true

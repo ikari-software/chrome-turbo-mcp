@@ -1,5 +1,5 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.2.0
+VERSION = 1.2.1
 
 .PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi watch
 
